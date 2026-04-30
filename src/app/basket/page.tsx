@@ -9,13 +9,28 @@ import BasketClient from "./BasketClient";
 export const dynamic = "force-dynamic";
 
 export default async function BasketPage() {
-  const persistence = getPersistenceStatus();
-  const initial = persistence.available ? await loadBasketFromDb() : null;
+  let persistenceAvailable = false;
+  let persistenceMessage: string | undefined;
+  let initial = null;
+  try {
+    const persistence = getPersistenceStatus();
+    persistenceAvailable = persistence.available;
+    persistenceMessage = persistence.reason;
+    if (persistenceAvailable) {
+      initial = await loadBasketFromDb();
+    }
+  } catch (err) {
+    console.error("[polybot] basket page server hydration failed:", err);
+    persistenceAvailable = false;
+    persistenceMessage =
+      "Persistence is misconfigured (server-side error). Falling back to localStorage. Check the Vercel function logs for the underlying error.";
+  }
+
   return (
     <BasketClient
       initial={initial}
-      persistenceAvailable={persistence.available}
-      persistenceMessage={persistence.reason}
+      persistenceAvailable={persistenceAvailable}
+      persistenceMessage={persistenceMessage}
     />
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   clearBasket,
   getBasketSnapshot,
@@ -20,6 +20,8 @@ import type {
 } from "@/lib/optimiser/types";
 import { fmtPrice, fmtUsd } from "@/lib/format";
 import { runOptimisation } from "./actions";
+
+const AUTO_SOLVE_DEBOUNCE_MS = 1500;
 
 interface BasketClientProps {
   initial: Basket | null;
@@ -41,9 +43,10 @@ export default function BasketClient({
   }, []);
 
   const basket = useBasket();
-  const [pending, startTransition] = useTransition();
+  const [solving, setSolving] = useState(false);
   const [result, setResult] = useState<OptimiseResult | null>(null);
   const [solveError, setSolveError] = useState<string | null>(null);
+  const [lastSolvedAt, setLastSolvedAt] = useState<number | null>(null);
 
   const scenarios = useMemo(() => {
     if (!basket || basket.legs.length === 0) return [];
@@ -62,6 +65,80 @@ export default function BasketClient({
     );
   }, [basket]);
 
+  // Auto-solve: every basket change schedules a solve after a debounce.
+  // The latest snapshot wins; in-flight solves are dropped if a newer
+  // change arrives. We key the cache by a stable digest so identical
+  // basket states don't re-trigger.
+  const basketDigest = useMemo(() => digestBasket(basket), [basket]);
+  const inFlightToken = useRef(0);
+  const lastSolvedDigest = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!basket || basket.legs.length === 0) {
+      setResult(null);
+      setSolveError(null);
+      lastSolvedDigest.current = null;
+      return;
+    }
+    if (basketDigest === lastSolvedDigest.current) return;
+
+    const timer = setTimeout(() => {
+      const snap = getBasketSnapshot();
+      if (!snap || snap.legs.length === 0) return;
+      const digestAtFire = digestBasket(snap);
+      if (digestAtFire === lastSolvedDigest.current) return;
+
+      const token = ++inFlightToken.current;
+      setSolving(true);
+      setSolveError(null);
+
+      runOptimisation(snap)
+        .then((r) => {
+          // Drop late results — a newer change has already been queued.
+          if (token !== inFlightToken.current) return;
+          setResult(r);
+          setLastSolvedAt(Date.now());
+          lastSolvedDigest.current = digestAtFire;
+        })
+        .catch((e) => {
+          if (token !== inFlightToken.current) return;
+          setSolveError(e instanceof Error ? e.message : "Unknown solver error");
+        })
+        .finally(() => {
+          if (token !== inFlightToken.current) return;
+          setSolving(false);
+        });
+    }, AUTO_SOLVE_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [basket, basketDigest]);
+
+  const forceResolve = () => {
+    lastSolvedDigest.current = null;
+    // Trigger a fresh effect run by mutating the basket reference would be
+    // intrusive; instead just call the action directly with a new token.
+    const snap = getBasketSnapshot();
+    if (!snap || snap.legs.length === 0) return;
+    const token = ++inFlightToken.current;
+    setSolving(true);
+    setSolveError(null);
+    runOptimisation(snap)
+      .then((r) => {
+        if (token !== inFlightToken.current) return;
+        setResult(r);
+        setLastSolvedAt(Date.now());
+        lastSolvedDigest.current = digestBasket(snap);
+      })
+      .catch((e) => {
+        if (token !== inFlightToken.current) return;
+        setSolveError(e instanceof Error ? e.message : "Unknown solver error");
+      })
+      .finally(() => {
+        if (token !== inFlightToken.current) return;
+        setSolving(false);
+      });
+  };
+
   const persistenceBanner = !persistenceAvailable && (
     <div className="rounded border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-300">
       <strong>Persistence not configured.</strong>{" "}
@@ -78,20 +155,6 @@ export default function BasketClient({
       </div>
     );
   }
-
-  const onSolve = () => {
-    setSolveError(null);
-    const snap = getBasketSnapshot();
-    if (!snap) return;
-    startTransition(async () => {
-      try {
-        const r = await runOptimisation(snap);
-        setResult(r);
-      } catch (e) {
-        setSolveError(e instanceof Error ? e.message : "Unknown solver error");
-      }
-    });
-  };
 
   return (
     <div className="space-y-6">
@@ -110,6 +173,7 @@ export default function BasketClient({
                 if (confirm("Clear the basket?")) {
                   clearBasket();
                   setResult(null);
+                  lastSolvedDigest.current = null;
                 }
               }}
               className="text-bad hover:underline"
@@ -118,14 +182,11 @@ export default function BasketClient({
             </button>
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onSolve}
-          disabled={pending}
-          className="rounded-md bg-accent px-4 py-2 text-sm font-semibold text-bg hover:bg-accent/90 disabled:opacity-50"
-        >
-          {pending ? "Solving…" : "Solve"}
-        </button>
+        <SolveStatus
+          solving={solving}
+          lastSolvedAt={lastSolvedAt}
+          onForceResolve={forceResolve}
+        />
       </header>
 
       {solveError && (
@@ -151,6 +212,65 @@ export default function BasketClient({
       {result && <ResultPanel result={result} legNames={basket.legs.map((l) => l.question)} />}
     </div>
   );
+}
+
+// Stable string fingerprint of the bits of basket state that affect the
+// LP solution. Probabilities don't change the solve (they only feed the
+// expected-profit calc), so we include them too — easier than re-running
+// the result mapper.
+function digestBasket(b: Basket | null): string {
+  if (!b) return "";
+  return JSON.stringify({
+    s: b.section,
+    bg: b.budget,
+    legs: b.legs.map((l) => [l.marketId, l.preferredSide, l.cap ?? null]),
+    p: b.thesis.predicates,
+    pr: b.thesis.scenarioProbabilities ?? null,
+  });
+}
+
+function SolveStatus({
+  solving,
+  lastSolvedAt,
+  onForceResolve,
+}: {
+  solving: boolean;
+  lastSolvedAt: number | null;
+  onForceResolve: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 text-xs">
+      {solving ? (
+        <span className="flex items-center gap-2 text-accent">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
+          Solving…
+        </span>
+      ) : lastSolvedAt ? (
+        <span className="text-muted">
+          solved {formatRelative(lastSolvedAt)}
+        </span>
+      ) : (
+        <span className="text-muted">awaiting changes…</span>
+      )}
+      <button
+        type="button"
+        onClick={onForceResolve}
+        disabled={solving}
+        className="rounded border border-border bg-panel2 px-3 py-1 hover:border-accent hover:text-accent disabled:opacity-50"
+        title="Re-fetch fresh orderbook ladders and re-solve from scratch"
+      >
+        Re-solve
+      </button>
+    </div>
+  );
+}
+
+function formatRelative(ts: number): string {
+  const diff = Math.max(0, Date.now() - ts);
+  if (diff < 5_000) return "just now";
+  if (diff < 60_000) return `${Math.round(diff / 1000)}s ago`;
+  if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
+  return `${Math.round(diff / 3_600_000)}h ago`;
 }
 
 function EmptyState() {
