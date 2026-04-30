@@ -1,37 +1,20 @@
 import Link from "next/link";
 
-export type SortKey =
-  | "volume24hr"
-  | "liquidity"
-  | "endDate"
-  | "strongerSum"
-  | "dutchEdge";
+export type SortKey = "volume24hr" | "liquidity" | "endDate" | "hedgeEdge";
 
 export const SORT_OPTIONS: { key: SortKey; label: string; tooltip: string }[] = [
   { key: "volume24hr", label: "24h volume", tooltip: "Most actively traded over the last 24 hours" },
   { key: "liquidity", label: "Liquidity", tooltip: "Deepest order books first" },
   { key: "endDate", label: "Ending soonest", tooltip: "Resolves earliest first" },
   {
-    key: "strongerSum",
-    label: "Σ stronger side",
+    key: "hedgeEdge",
+    label: "Hedge edge",
     tooltip:
-      "Σ max(p, 1−p) across legs — picks the more-likely side per market (YES if p>0.5, NO otherwise) and sums those probabilities",
-  },
-  {
-    key: "dutchEdge",
-    label: "Dutch-book edge",
-    tooltip:
-      "For mutually-exclusive events: |Σ Yes − 1|, descending. Surfaces both Σ>1 (buy all NOs) and Σ<1 (buy all YESs) arbitrage opportunities",
+      "For mutually-exclusive events: |Σ Yes − 1|, descending. The LP-friendly arbitrage size — when Σ Yes > 1, buying NO on every leg is risk-free (exactly n−1 NOs always win); when Σ Yes < 1, buying YES on every leg pays $1 guaranteed. Both surface here.",
   },
 ];
 
-const VALID: SortKey[] = [
-  "volume24hr",
-  "liquidity",
-  "endDate",
-  "strongerSum",
-  "dutchEdge",
-];
+const VALID: SortKey[] = ["volume24hr", "liquidity", "endDate", "hedgeEdge"];
 
 export function parseSortKey(value: string | string[] | undefined): SortKey {
   const v = Array.isArray(value) ? value[0] : value;

@@ -1,13 +1,13 @@
 import { listEvents } from "@/lib/polymarket/gamma";
 import type { PolyEvent } from "@/lib/polymarket/types";
-import { dutchBookDistance, strongerSideSum } from "@/lib/hedge";
+import { hedgeEdge } from "@/lib/hedge";
 import EventCard from "@/components/EventCard";
 import SectionHeader from "@/components/SectionHeader";
 import SortControl, { parseSortKey, type SortKey } from "@/components/SortControl";
 
 export const revalidate = 60;
 
-const COMPUTED_SORTS: SortKey[] = ["strongerSum", "dutchEdge"];
+const COMPUTED_SORTS: SortKey[] = ["hedgeEdge"];
 
 export default async function PoliticsPage({
   searchParams,
@@ -28,8 +28,7 @@ export default async function PoliticsPage({
       order: apiOrder,
       ascending: sort === "endDate",
     });
-    if (sort === "strongerSum") events = applyComputedSort(events, strongerSideSum);
-    else if (sort === "dutchEdge") events = applyComputedSort(events, dutchBookDistance);
+    if (sort === "hedgeEdge") events = applyComputedSort(events, hedgeEdge);
   } catch (e) {
     error = e instanceof Error ? e.message : "Unknown error";
   }

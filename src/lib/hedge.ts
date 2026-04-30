@@ -36,21 +36,20 @@ export function summariseEvent(event: PolyEvent): HedgeSummary {
   };
 }
 
-// Σ max(p_i, 1−p_i) across the priced markets — the cost of buying the
-// more-likely side on every leg, equivalent to the highest single-side
-// probability sum reachable across any Y/N combination.
-export function strongerSideSum(event: PolyEvent): number {
-  let total = 0;
-  for (const m of event.markets) {
-    if (typeof m.yesPrice !== "number") continue;
-    total += Math.max(m.yesPrice, 1 - m.yesPrice);
-  }
-  return total;
-}
-
-// |Σ Yes − 1|, only meaningful for mutually-exclusive events. Larger means
-// further from arbitrage-free pricing in either direction.
-export function dutchBookDistance(event: PolyEvent): number {
+// Hedge edge for mutually-exclusive events: |Σ Yes − 1|, descending.
+//
+// The math: in a mutex event with n markets, exactly 1 resolves YES and
+// (n−1) resolve NO. So:
+//   • Buying NO on every leg always pays $(n−1) regardless of which one
+//     wins → cost (n − Σp), profit Σp − 1 if Σp > 1.
+//   • Buying YES on every leg always pays $1 (the winner) → cost Σp,
+//     profit 1 − Σp if Σp < 1.
+// Both strategies are self-hedging because the mutex constraint means
+// exactly the right number of legs settle in your favour. The metric
+// |Σp − 1| picks the larger of the two edges, surfacing arbitrage
+// candidates in either direction. Returns 0 for non-mutex events since
+// no canonical self-hedge exists without a user-supplied thesis.
+export function hedgeEdge(event: PolyEvent): number {
   if (!event.negRisk) return 0;
   const summary = summariseEvent(event);
   if (summary.considered < 2) return 0;
