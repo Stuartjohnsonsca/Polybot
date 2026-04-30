@@ -6,8 +6,12 @@ import type { Scenario, Thesis, ThesisPredicate } from "./types";
 //   - Smart enumeration via C(n,k) supports much larger n as long as the
 //     thesis bounds the YES-count, but we still cap the final scenario
 //     set at MAX_SCENARIOS to keep the LP from exploding.
+//
+// 500k scenarios with the GLPK solver path solves in ~30–60s wall on
+// Vercel Hobby (1024MB function memory). Push the cap higher if/when we
+// move to constraint-generation rather than full enumeration.
 const MAX_LEGS_FOR_FULL_ENUMERATION = 14;
-export const MAX_SCENARIOS = 50_000;
+export const MAX_SCENARIOS = 500_000;
 
 export class ThesisEnumerationError extends Error {
   code: "TOO_MANY_LEGS_UNBOUNDED" | "TOO_MANY_SCENARIOS";
@@ -38,6 +42,34 @@ export function countBound(
     }
   }
   return { min, max };
+}
+
+// Cheap upper-bound estimate of the scenario count for the given thesis,
+// without actually enumerating. Used in the UI so the user can see how
+// their predicate choices affect tractability before hitting the solver.
+// Returns Infinity for unsupported configurations (n > 14 with no count
+// predicate); implies predicates are NOT factored in (overestimates).
+export function estimateScenarioCount(n: number, thesis: Thesis): number {
+  if (n <= 0) return 0;
+  const { min, max } = countBound(n, thesis.predicates);
+  if (min > max) return 0;
+  if (min === 0 && max === n) {
+    return n > MAX_LEGS_FOR_FULL_ENUMERATION ? Infinity : 1 << n;
+  }
+  let total = 0;
+  for (let k = min; k <= max; k++) total += binomial(n, k);
+  return total;
+}
+
+function binomial(n: number, k: number): number {
+  if (k < 0 || k > n) return 0;
+  if (k === 0 || k === n) return 1;
+  k = Math.min(k, n - k);
+  let result = 1;
+  for (let i = 0; i < k; i++) {
+    result = (result * (n - i)) / (i + 1);
+  }
+  return Math.round(result);
 }
 
 // In-place lexicographic generator over k-element subsets of {0..n-1}.

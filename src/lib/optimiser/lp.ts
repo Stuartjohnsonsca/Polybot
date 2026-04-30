@@ -120,9 +120,25 @@ export function buildProgram(
   };
 }
 
-// Run the LP. Pulled out so we can swap solver implementations later.
+// Threshold for switching from javascript-lp-solver to GLPK. The pure-JS
+// simplex degrades roughly O(n²) past ~2k constraints; GLPK is sparse,
+// revised-simplex, and scales to tens of thousands of constraints in
+// reasonable wall time. We pick by constraint count since that's what
+// dominates simplex iteration cost.
+const GLPK_THRESHOLD_CONSTRAINTS = 2000;
+
+// Run the LP. Dispatches to javascript-lp-solver for small problems
+// (faster cold-start, no WASM init) and GLPK for larger ones.
 export async function solveProgram(model: LpModel): Promise<LpRawSolution> {
-  // Lazy-load the solver so it doesn't bloat any client bundle.
+  const constraintCount = Object.keys(model.constraints).length;
+  if (constraintCount > GLPK_THRESHOLD_CONSTRAINTS) {
+    const { solveWithGlpk } = await import("./lp-glpk");
+    return solveWithGlpk(model);
+  }
+  return solveWithJsLpSolver(model);
+}
+
+async function solveWithJsLpSolver(model: LpModel): Promise<LpRawSolution> {
   const mod = await import("javascript-lp-solver");
   const solver = (mod.default ?? mod) as { Solve: (m: LpModel) => LpSolverRaw };
   const raw = solver.Solve(model);
@@ -133,7 +149,6 @@ export async function solveProgram(model: LpModel): Promise<LpRawSolution> {
     if (k === "feasible" || k === "result" || k === "bounded") continue;
     if (typeof v === "number") varValues[k] = v;
   }
-  // The solver's `result` is the objective value (t_pos − t_neg).
   const worstCaseProfit = feasible ? Number(raw.result ?? 0) : Number.NaN;
   return { feasible, worstCaseProfit, varValues };
 }

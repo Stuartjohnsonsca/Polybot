@@ -12,7 +12,7 @@ import {
   setThesisPredicates,
   useBasket,
 } from "@/lib/basket/store";
-import { enumerateScenarios } from "@/lib/optimiser/thesis";
+import { enumerateScenarios, estimateScenarioCount, MAX_SCENARIOS } from "@/lib/optimiser/thesis";
 import type {
   Basket,
   OptimiseResult,
@@ -201,6 +201,7 @@ export default function BasketClient({
         predicates={basket.thesis.predicates}
         legCount={basket.legs.length}
         legNames={basket.legs.map((l) => l.question)}
+        scenarioEstimate={estimateScenarioCount(basket.legs.length, basket.thesis)}
       />
       <ScenarioProbsPanel
         scenarios={scenarios}
@@ -362,21 +363,37 @@ function ThesisPanel({
   predicates,
   legCount,
   legNames,
+  scenarioEstimate,
 }: {
   predicates: ThesisPredicate[];
   legCount: number;
   legNames: string[];
+  scenarioEstimate: number;
 }) {
   const add = (p: ThesisPredicate) => setThesisPredicates([...predicates, p]);
   const remove = (i: number) =>
     setThesisPredicates(predicates.filter((_, idx) => idx !== i));
 
+  const overCap = scenarioEstimate > MAX_SCENARIOS;
+  const scenarioLabel =
+    scenarioEstimate === Infinity
+      ? `2^${legCount} (unbounded — needs a count predicate)`
+      : scenarioEstimate.toLocaleString();
+
   return (
     <section className="rounded-lg border border-border bg-panel p-4">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-medium">Thesis</h2>
-        <span className="text-xs text-muted">
-          {predicates.length} predicate{predicates.length === 1 ? "" : "s"}
+        <span className="text-xs">
+          <span className="text-muted">
+            {predicates.length} predicate{predicates.length === 1 ? "" : "s"} ·{" "}
+          </span>
+          <span
+            className={overCap || scenarioEstimate === Infinity ? "text-bad" : "text-muted"}
+            title={`Scenario count drives LP size. Hard cap: ${MAX_SCENARIOS.toLocaleString()}.`}
+          >
+            ~{scenarioLabel} scenarios
+          </span>
         </span>
       </div>
 
@@ -615,8 +632,73 @@ function ResultPanel({
   result: OptimiseResult;
   legNames: string[];
 }) {
+  const hasTrades = result.legStakes.length > 0;
   return (
     <section className="space-y-4">
+      {/* Proposed trades — surfaced FIRST so the directional bets are
+          impossible to miss. Empty-state explains *why* there are none. */}
+      <div className="rounded-lg border border-border bg-panel">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h2 className="text-sm font-medium">
+            Proposed trades{" "}
+            <span className="text-muted">
+              — chosen by the optimiser to hedge your thesis
+            </span>
+          </h2>
+          {hasTrades && (
+            <span className="text-xs text-muted">
+              {result.legStakes.length} leg{result.legStakes.length === 1 ? "" : "s"} ·{" "}
+              {fmtUsd(result.totalStaked, { compact: false })} total
+            </span>
+          )}
+        </div>
+        {hasTrades ? (
+          <ul className="divide-y divide-border">
+            {result.legStakes.map((s) => (
+              <li
+                key={`${s.marketId}-${s.side}`}
+                className="grid grid-cols-[auto_1fr_auto_auto] items-center gap-3 px-4 py-3 text-sm"
+              >
+                <span
+                  className={`rounded px-3 py-1 text-xs font-bold tracking-wide ${
+                    s.side === "YES"
+                      ? "bg-good/20 text-good"
+                      : "bg-accent2/20 text-accent2"
+                  }`}
+                  title={
+                    s.side === "YES"
+                      ? "Buy YES shares — wins $1 per share if this market resolves YES"
+                      : "Buy NO shares — wins $1 per share if this market resolves NO"
+                  }
+                >
+                  BUY {s.side}
+                </span>
+                <span className="truncate" title={s.question}>
+                  {s.question}
+                </span>
+                <span className="font-mono text-xs text-muted">
+                  @ {fmtPrice(s.averagePrice)} · {s.totalShares.toFixed(0)} shares
+                </span>
+                <span className="w-24 text-right font-mono text-sm">
+                  {fmtUsd(s.totalDollars, { compact: false })}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div className="px-4 py-5 text-sm text-muted">
+            <p>
+              <strong className="text-text">No trades proposed.</strong>{" "}
+              The optimiser couldn&apos;t find a hedged combination that
+              improves on doing nothing under the current basket and thesis.
+              {result.warnings.length > 0
+                ? " See the diagnostics below for why."
+                : " Try tightening the thesis (lower K), adjusting the legs, or increasing the budget."}
+            </p>
+          </div>
+        )}
+      </div>
+
       <div className="rounded-lg border border-border bg-panel p-4">
         <h2 className="text-sm font-medium">Solve result</h2>
         <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -658,7 +740,7 @@ function ResultPanel({
 
       {result.warnings.length > 0 && (
         <div className="rounded-lg border border-border bg-panel p-4">
-          <h3 className="text-sm font-medium">Warnings</h3>
+          <h3 className="text-sm font-medium">Diagnostics</h3>
           <ul className="mt-2 space-y-1 text-xs">
             {result.warnings.map((w, i) => (
               <li
@@ -670,40 +752,6 @@ function ResultPanel({
                 }
               >
                 {w.message}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {result.legStakes.length > 0 && (
-        <div className="rounded-lg border border-border bg-panel">
-          <div className="border-b border-border px-4 py-3 text-sm font-medium">
-            Stakes <span className="text-muted">(side chosen by the optimiser)</span>
-          </div>
-          <ul className="divide-y divide-border">
-            {result.legStakes.map((s) => (
-              <li
-                key={`${s.marketId}-${s.side}`}
-                className="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-3 px-4 py-3 text-sm"
-              >
-                <span className="truncate">{s.question}</span>
-                <span
-                  className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
-                    s.side === "YES" ? "bg-good/15 text-good" : "bg-accent2/15 text-accent2"
-                  }`}
-                >
-                  {s.side}
-                </span>
-                <span className="font-mono text-xs text-muted">
-                  avg {fmtPrice(s.averagePrice)}
-                </span>
-                <span className="font-mono text-xs text-muted">
-                  {s.totalShares.toFixed(0)} shares
-                </span>
-                <span className="w-24 text-right font-mono text-sm">
-                  {fmtUsd(s.totalDollars, { compact: false })}
-                </span>
               </li>
             ))}
           </ul>
