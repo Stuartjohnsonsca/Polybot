@@ -49,13 +49,26 @@ npm run dev
 
 Open http://localhost:3000.
 
-## Deploying to Railway
+## Deploying
+
+### Vercel (current)
+
+1. Import the repo from the Vercel dashboard.
+2. Defaults work — Next.js 15 is auto-detected.
+3. **Enable basket persistence** (one-time):
+   - In the project, **Storage → Create → Neon Postgres**.
+   - Connect it to the project; Vercel injects `DATABASE_URL` automatically.
+   - Redeploy. The first basket save will create the schema on demand
+     (`CREATE TABLE IF NOT EXISTS baskets`).
+4. Without a database connected, the app still runs — the basket falls
+   back to localStorage and a banner shows on `/basket`.
+
+### Railway (alternative)
 
 1. Connect this repo to a Railway project.
-2. Railway will auto-detect Node and build via `nixpacks.toml`.
-3. No env vars are required; defaults point at the public Gamma API.
-   Optional: `GAMMA_CACHE_TTL` (seconds, default 60).
-4. Railway sets `PORT` automatically; `npm run start` honours it.
+2. Railway auto-detects Node and builds via `nixpacks.toml`.
+3. Railway sets `PORT` automatically; `npm run start` honours it.
+4. For persistence, add a Postgres service and set `DATABASE_URL`.
 
 ## Project layout
 

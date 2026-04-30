@@ -1,9 +1,8 @@
 "use client";
 
-// Client-side basket store backed by localStorage.
-// One basket per browser; the design intentionally keeps it simple for v1.
-// We expose React hooks that subscribe to a shared store so all components
-// (Nav badge, basket page, AddToBasketButton) react to the same state.
+// Client-side basket store with write-through to server-side Postgres.
+// localStorage acts as a fast cache; every mutation also fires a debounced
+// server-action so the basket survives across browsers and deploys.
 
 import { useSyncExternalStore } from "react";
 import type {
@@ -14,8 +13,10 @@ import type {
   ThesisPredicate,
 } from "@/lib/optimiser/types";
 import type { Section } from "@/lib/polymarket/types";
+import { persistBasket } from "@/app/basket/actions";
 
 const STORAGE_KEY = "polybot:basket:v1";
+const SERVER_PUSH_DEBOUNCE_MS = 600;
 
 const DEFAULT_BUDGET = 1000;
 
@@ -52,12 +53,45 @@ function read(): Basket | null {
   }
 }
 
+let serverPushTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingServerPayload: Basket | null = null;
+
+function schedulePush(b: Basket | null) {
+  pendingServerPayload = b;
+  if (serverPushTimer) clearTimeout(serverPushTimer);
+  serverPushTimer = setTimeout(() => {
+    const payload = pendingServerPayload;
+    pendingServerPayload = null;
+    serverPushTimer = null;
+    persistBasket(payload).catch((err) => {
+      console.error("[polybot] persistBasket failed:", err);
+    });
+  }, SERVER_PUSH_DEBOUNCE_MS);
+}
+
 function write(b: Basket | null) {
   cached = b;
   if (typeof window === "undefined") return;
   if (b === null) window.localStorage.removeItem(STORAGE_KEY);
   else window.localStorage.setItem(STORAGE_KEY, JSON.stringify(b));
   for (const l of listeners) l();
+  schedulePush(b);
+}
+
+// Bypass schedulePush — used during initial server-side hydration so we
+// don't immediately push the just-loaded value back to the server.
+function writeWithoutSync(b: Basket | null) {
+  cached = b;
+  if (typeof window === "undefined") return;
+  if (b === null) window.localStorage.removeItem(STORAGE_KEY);
+  else window.localStorage.setItem(STORAGE_KEY, JSON.stringify(b));
+  for (const l of listeners) l();
+}
+
+export function hydrateFromServer(b: Basket | null) {
+  // Only overwrite if we don't already have local state — avoids
+  // clobbering optimistic updates made before hydration completed.
+  if (read() === null) writeWithoutSync(b);
 }
 
 function subscribe(cb: () => void) {

@@ -36,6 +36,27 @@ export function summariseEvent(event: PolyEvent): HedgeSummary {
   };
 }
 
+// Σ max(p_i, 1−p_i) across the priced markets — the cost of buying the
+// more-likely side on every leg, equivalent to the highest single-side
+// probability sum reachable across any Y/N combination.
+export function strongerSideSum(event: PolyEvent): number {
+  let total = 0;
+  for (const m of event.markets) {
+    if (typeof m.yesPrice !== "number") continue;
+    total += Math.max(m.yesPrice, 1 - m.yesPrice);
+  }
+  return total;
+}
+
+// |Σ Yes − 1|, only meaningful for mutually-exclusive events. Larger means
+// further from arbitrage-free pricing in either direction.
+export function dutchBookDistance(event: PolyEvent): number {
+  if (!event.negRisk) return 0;
+  const summary = summariseEvent(event);
+  if (summary.considered < 2) return 0;
+  return Math.abs(summary.yesPriceSum - 1);
+}
+
 export interface BasketLeg {
   marketId: string;
   question: string;
