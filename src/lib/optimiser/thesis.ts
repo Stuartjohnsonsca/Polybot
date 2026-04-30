@@ -1,18 +1,92 @@
 import type { Scenario, Thesis, ThesisPredicate } from "./types";
 
-const MAX_LEGS_FOR_ENUMERATION = 14; // 2^14 = 16384 raw scenarios.
+// Hard caps to keep the LP tractable.
+//   - Full 2^n enumeration (used when no count-bounded predicate exists)
+//     stays at 14 → 16384 raw scenarios.
+//   - Smart enumeration via C(n,k) supports much larger n as long as the
+//     thesis bounds the YES-count, but we still cap the final scenario
+//     set at MAX_SCENARIOS to keep the LP from exploding.
+const MAX_LEGS_FOR_FULL_ENUMERATION = 14;
+export const MAX_SCENARIOS = 50_000;
+
+export class ThesisEnumerationError extends Error {
+  code: "TOO_MANY_LEGS_UNBOUNDED" | "TOO_MANY_SCENARIOS";
+  constructor(
+    code: "TOO_MANY_LEGS_UNBOUNDED" | "TOO_MANY_SCENARIOS",
+    message: string,
+  ) {
+    super(message);
+    this.code = code;
+    this.name = "ThesisEnumerationError";
+  }
+}
+
+// Derive the tightest YES-count window the thesis allows. Predicates that
+// don't bound the count (implies) are ignored here and applied as a filter
+// in the enumerator below.
+export function countBound(
+  n: number,
+  predicates: ThesisPredicate[],
+): { min: number; max: number } {
+  let min = 0;
+  let max = n;
+  for (const p of predicates) {
+    if (p.kind === "atMostK") max = Math.min(max, p.k);
+    else if (p.kind === "exactlyK") {
+      min = Math.max(min, p.k);
+      max = Math.min(max, p.k);
+    }
+  }
+  return { min, max };
+}
+
+// In-place lexicographic generator over k-element subsets of {0..n-1}.
+function* combinationsOfSize(n: number, k: number): Generator<number[]> {
+  if (k < 0 || k > n) return;
+  if (k === 0) {
+    yield [];
+    return;
+  }
+  const indices = Array.from({ length: k }, (_, i) => i);
+  while (true) {
+    yield indices;
+    let i = k - 1;
+    while (i >= 0 && indices[i] === n - k + i) i--;
+    if (i < 0) return;
+    indices[i]++;
+    for (let j = i + 1; j < k; j++) indices[j] = indices[j - 1] + 1;
+  }
+}
 
 // Enumerate all 2^n joint Y/N assignments and keep only those satisfying
-// every predicate in the thesis. The result is the scenario set S used in
-// the LP's max-min constraints.
+// every predicate in the thesis. Throws ThesisEnumerationError when the
+// problem is too large for the cheap-and-cheerful path.
+//
+// When the thesis bounds the YES-count via atMostK or exactlyK we take
+// the smart path: generate only subsets of the allowed sizes and apply
+// the remaining (implies) predicates as a filter. This makes large
+// baskets (20–30 legs) tractable as long as the thesis is tight enough.
 export function enumerateScenarios(n: number, thesis: Thesis): Scenario[] {
   if (n <= 0) return [];
-  if (n > MAX_LEGS_FOR_ENUMERATION) {
-    throw new Error(
-      `Too many legs (${n}). The optimiser enumerates 2^n scenarios; cap is ${MAX_LEGS_FOR_ENUMERATION}.`,
-    );
+
+  const { min, max } = countBound(n, thesis.predicates);
+  if (min > max) return [];
+
+  const isUnbounded = min === 0 && max === n;
+  if (isUnbounded) {
+    if (n > MAX_LEGS_FOR_FULL_ENUMERATION) {
+      throw new ThesisEnumerationError(
+        "TOO_MANY_LEGS_UNBOUNDED",
+        `Too many legs (${n}) without a count-bounded thesis. Add an "at most K YES" or "exactly K YES" predicate so the optimiser only considers feasible scenarios.`,
+      );
+    }
+    return enumerateFull(n, thesis.predicates);
   }
 
+  return enumerateBounded(n, min, max, thesis.predicates);
+}
+
+function enumerateFull(n: number, predicates: ThesisPredicate[]): Scenario[] {
   const total = 1 << n;
   const out: Scenario[] = [];
   for (let mask = 0; mask < total; mask++) {
@@ -23,8 +97,41 @@ export function enumerateScenarios(n: number, thesis: Thesis): Scenario[] {
       yes[i] = bit === 1;
       if (bit === 1) yesCount++;
     }
-    if (!satisfies(yes, yesCount, thesis.predicates)) continue;
+    if (!satisfies(yes, yesCount, predicates)) continue;
     out.push({ yes, key: encodeKey(yes) });
+  }
+  return out;
+}
+
+function enumerateBounded(
+  n: number,
+  min: number,
+  max: number,
+  predicates: ThesisPredicate[],
+): Scenario[] {
+  const impliesPreds = predicates.filter(
+    (p): p is Extract<ThesisPredicate, { kind: "implies" }> => p.kind === "implies",
+  );
+  const out: Scenario[] = [];
+  for (let k = min; k <= max; k++) {
+    for (const indices of combinationsOfSize(n, k)) {
+      if (out.length >= MAX_SCENARIOS) {
+        throw new ThesisEnumerationError(
+          "TOO_MANY_SCENARIOS",
+          `Thesis admits too many scenarios (over ${MAX_SCENARIOS.toLocaleString()}). Tighten the predicates — e.g. lower K in "at most K YES" — so the optimiser can solve in reasonable time.`,
+        );
+      }
+      const yes = new Array<boolean>(n).fill(false);
+      for (const i of indices) yes[i] = true;
+      let ok = true;
+      for (const p of impliesPreds) {
+        if (yes[p.from] && !yes[p.to]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) out.push({ yes, key: encodeKey(yes) });
+    }
   }
   return out;
 }

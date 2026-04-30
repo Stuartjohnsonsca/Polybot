@@ -1,9 +1,16 @@
 // Public optimiser entry. Server-side only — pulls orderbooks via the
 // CLOB client and runs the LP solver lazily.
+//
+// Invariant: this function NEVER throws. Every internal failure is
+// converted into a `feasible: false` OptimiseResult with a user-facing
+// warning, so the calling server action can serialise the result back
+// to the client cleanly. Server actions that throw in production are
+// redacted by Next.js, so propagating errors loses the actionable
+// message — we keep it inside the result instead.
 
 import { fetchOrderbooks } from "../polymarket/clob";
 import type { Basket, BookMap, OptimiseResult } from "./types";
-import { enumerateScenarios } from "./thesis";
+import { enumerateScenarios, ThesisEnumerationError } from "./thesis";
 import { buildLadders } from "./ladder";
 import { buildProgram, solveProgram } from "./lp";
 import { buildResult } from "./result";
@@ -11,6 +18,19 @@ import { buildResult } from "./result";
 export type { Basket, BasketLeg, OptimiseResult, Side, Thesis, ThesisPredicate } from "./types";
 
 export async function optimiseBasket(basket: Basket): Promise<OptimiseResult> {
+  try {
+    return await optimiseBasketUnsafe(basket);
+  } catch (err) {
+    console.error("[polybot] optimiseBasket unexpected error:", err);
+    const message =
+      err instanceof Error
+        ? err.message
+        : "Optimisation failed for an unknown reason.";
+    return emptyResult(basket, message);
+  }
+}
+
+async function optimiseBasketUnsafe(basket: Basket): Promise<OptimiseResult> {
   if (basket.legs.length === 0) {
     return emptyResult(basket, "Add at least one leg to the basket.");
   }
@@ -18,7 +38,15 @@ export async function optimiseBasket(basket: Basket): Promise<OptimiseResult> {
     return emptyResult(basket, "Set a positive budget.");
   }
 
-  const scenarios = enumerateScenarios(basket.legs.length, basket.thesis);
+  let scenarios;
+  try {
+    scenarios = enumerateScenarios(basket.legs.length, basket.thesis);
+  } catch (err) {
+    if (err instanceof ThesisEnumerationError) {
+      return emptyResult(basket, err.message);
+    }
+    throw err;
+  }
   if (scenarios.length === 0) {
     return emptyResult(
       basket,
