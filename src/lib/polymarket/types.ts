@@ -15,6 +15,7 @@ export interface GammaMarketRaw {
   slug: string;
   outcomes?: string;
   outcomePrices?: string;
+  clobTokenIds?: string; // JSON-encoded ["yesTokenId", "noTokenId"]
   startDate?: string;
   endDate?: string;
   volume?: string | number;
@@ -57,6 +58,8 @@ export interface GammaEventRaw {
   tags?: GammaTag[];
 }
 
+export type Section = "politics" | "forex";
+
 export interface PolyMarket {
   id: string;
   conditionId?: string;
@@ -65,6 +68,8 @@ export interface PolyMarket {
   outcomes: string[]; // typically ["Yes", "No"]
   outcomePrices: number[]; // aligned with outcomes
   yesPrice: number | null; // convenience: price of the "Yes" outcome
+  yesTokenId: string | null;
+  noTokenId: string | null;
   volume: number;
   liquidity: number;
   endDate?: string;
@@ -86,4 +91,12 @@ export interface PolyEvent {
   negRisk: boolean;
   markets: PolyMarket[];
   tags: GammaTag[];
+}
+
+export function deriveSection(tags: GammaTag[]): Section | null {
+  for (const t of tags) {
+    if (t.slug === "politics") return "politics";
+    if (t.slug === "forex") return "forex";
+  }
+  return null;
 }

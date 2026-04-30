@@ -1,4 +1,5 @@
 import Link from "next/link";
+import BasketBadge from "./BasketBadge";
 
 export default function Nav() {
   return (
@@ -22,6 +23,7 @@ export default function Nav() {
           >
             Forex
           </Link>
+          <BasketBadge />
         </nav>
       </div>
     </header>

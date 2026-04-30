@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import { getEventBySlug } from "@/lib/polymarket/gamma";
 import { summariseEvent } from "@/lib/hedge";
 import { fmtUsd, fmtDate, daysUntil, fmtPrice } from "@/lib/format";
+import { deriveSection } from "@/lib/polymarket/types";
+import AddToBasketButton from "@/components/AddToBasketButton";
 
 export const revalidate = 60;
 
@@ -17,6 +19,7 @@ export default async function EventDetailPage({
 
   const summary = summariseEvent(event);
   const days = daysUntil(event.endDate);
+  const section = deriveSection(event.tags);
   const sortedMarkets = [...event.markets].sort(
     (a, b) => (b.yesPrice ?? 0) - (a.yesPrice ?? 0),
   );
@@ -127,13 +130,15 @@ export default async function EventDetailPage({
       <section className="rounded-lg border border-border bg-panel">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 className="text-sm font-medium">Markets</h2>
-          <span className="text-xs text-muted">sorted by Yes price</span>
+          <span className="text-xs text-muted">
+            sorted by Yes price{section ? ` · section: ${section}` : ""}
+          </span>
         </div>
         <ul className="divide-y divide-border">
           {sortedMarkets.map((m) => (
             <li
               key={m.id}
-              className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-4 px-4 py-3 text-sm"
+              className="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-4 px-4 py-3 text-sm"
             >
               <span className="truncate">{m.question}</span>
               <span className="font-mono text-xs text-muted">
@@ -145,6 +150,18 @@ export default async function EventDetailPage({
               <span className="w-16 text-right font-mono text-sm">
                 {fmtPrice(m.yesPrice)}
               </span>
+              {section ? (
+                <AddToBasketButton
+                  marketId={m.id}
+                  question={m.question}
+                  yesPrice={m.yesPrice}
+                  yesTokenId={m.yesTokenId}
+                  noTokenId={m.noTokenId}
+                  section={section}
+                />
+              ) : (
+                <span className="text-[10px] text-muted/60">no section tag</span>
+              )}
             </li>
           ))}
         </ul>

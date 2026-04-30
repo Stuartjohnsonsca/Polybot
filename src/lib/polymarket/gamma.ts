@@ -33,6 +33,13 @@ export function normaliseMarket(m: GammaMarketRaw): PolyMarket {
         ? m.lastTradePrice
         : null;
 
+  // clobTokenIds is a JSON-stringified ["yesTokenId", "noTokenId"] aligned
+  // with the outcomes array. We resolve each side defensively.
+  const tokenIds = safeJsonArray<string>(m.clobTokenIds);
+  const yesTokenId = yesIdx >= 0 && yesIdx < tokenIds.length ? tokenIds[yesIdx] : null;
+  const noIdx = outcomes.findIndex((o) => o.toLowerCase() === "no");
+  const noTokenId = noIdx >= 0 && noIdx < tokenIds.length ? tokenIds[noIdx] : null;
+
   return {
     id: m.id,
     conditionId: m.conditionId,
@@ -41,6 +48,8 @@ export function normaliseMarket(m: GammaMarketRaw): PolyMarket {
     outcomes,
     outcomePrices,
     yesPrice,
+    yesTokenId,
+    noTokenId,
     volume: toNumber(m.volumeNum ?? m.volume),
     liquidity: toNumber(m.liquidityNum ?? m.liquidity),
     endDate: m.endDate,
