@@ -35,13 +35,28 @@ export interface HedgeOpportunity {
   midYesSum: number; // Σ mid_YES — kept for reference / display only
   edge: number; // top-of-book arbitrage edge in $/payout coverage
   direction: HedgeDirection;
-  // Return on capital at top-of-book asks ($1 stake → estReturnPct profit).
+  // Return on capital at top-of-book asks ($1 stake → topOfBookReturnPct profit).
   topOfBookReturnPct: number;
   estProfitOnHundred: number;
+  // Time-scaled returns. Annualised assumes simple linear scaling
+  // (return × 365/days), which is the right call for short horizons
+  // and avoids overstating compound return on already-tiny edges.
+  daysToResolution: number | null;
+  annualisedTopReturnPct: number | null;
+  // Residual risk: dollars at risk on a $100 stake if the
+  // unhedged-by-mutex scenario occurs. For BUY_ALL_NO this is the
+  // "more than 1 leg resolves YES" case — Polymarket's negRisk
+  // mechanism enforces mutex on-chain, so this is effectively zero.
+  // For BUY_ALL_YES it's the "0 legs resolve YES" case (event voided
+  // or actual winner isn't in the listed candidates) — full stake
+  // wiped out.
+  residualRiskOnHundred: number;
+  residualRiskDescription: string;
   // LP-derived results (live ladder, $100 budget). Only populated for
   // the top-N candidates we actually solve.
   lp?: OptimiseResult;
   lpReturnPct?: number;
+  lpAnnualisedReturnPct?: number;
 }
 
 const MIN_EDGE_PCT = 0.001; // 0.1% return — anything tighter is noise/fees
@@ -119,6 +134,16 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
       if (topOfBookReturnPct < MIN_EDGE_PCT) continue;
       if (edge <= 0) continue;
 
+      const daysToResolution = computeDaysToResolution(event.endDate);
+      const annualisedTopReturnPct =
+        daysToResolution !== null && daysToResolution > 0
+          ? topOfBookReturnPct * (365 / daysToResolution)
+          : null;
+      const { residualRiskOnHundred, residualRiskDescription } = computeResidualRisk(
+        direction,
+        100,
+      );
+
       candidates.push({
         event,
         section,
@@ -130,6 +155,10 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
         direction,
         topOfBookReturnPct,
         estProfitOnHundred: 100 * topOfBookReturnPct,
+        daysToResolution,
+        annualisedTopReturnPct,
+        residualRiskOnHundred,
+        residualRiskDescription,
       });
     }
   }
@@ -147,7 +176,13 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
           lp.feasible && lp.totalStaked > 0
             ? lp.worstCaseProfit / lp.totalStaked
             : undefined;
-        return { ...c, lp, lpReturnPct };
+        const lpAnnualisedReturnPct =
+          lpReturnPct !== undefined &&
+          c.daysToResolution !== null &&
+          c.daysToResolution > 0
+            ? lpReturnPct * (365 / c.daysToResolution)
+            : undefined;
+        return { ...c, lp, lpReturnPct, lpAnnualisedReturnPct };
       } catch (err) {
         console.error(
           `[polybot] failed to LP-solve opportunity ${c.event.slug}:`,
@@ -201,4 +236,44 @@ export function legsForOpportunity(o: HedgeOpportunity): OpportunityLeg[] {
       yesTokenId: m.yesTokenId,
       noTokenId: m.noTokenId,
     }));
+}
+
+function computeDaysToResolution(endDate?: string): number | null {
+  if (!endDate) return null;
+  const ms = new Date(endDate).getTime();
+  if (Number.isNaN(ms)) return null;
+  const days = (ms - Date.now()) / 86_400_000;
+  if (days < 0) return null; // past — shouldn't occur on active events
+  return days;
+}
+
+function computeResidualRisk(
+  direction: HedgeDirection,
+  budget: number,
+): { residualRiskOnHundred: number; residualRiskDescription: string } {
+  if (direction === "BUY_ALL_NO") {
+    // Buying NO on every leg of a mutex event:
+    //   • Exactly 1 YES (normal mutex):  n−1 NOs win → profit, by design.
+    //   • 0 YES (no listed winner / event voided):  all n NOs win → bigger
+    //     profit than the 1-YES case. Upside, not risk.
+    //   • 2+ YES (would require Polymarket's mutex to fail):  multiple NOs
+    //     lose. Polymarket's negRisk mechanism enforces mutex resolution
+    //     on-chain, so this is effectively unreachable.
+    return {
+      residualRiskOnHundred: 0,
+      residualRiskDescription:
+        "Effectively zero. The hedge wins (or wins more) in every legitimate resolution. Multiple-YES would require Polymarket's on-chain mutex mechanism to fail.",
+    };
+  }
+  // BUY_ALL_YES
+  // Buying YES on every leg:
+  //   • Exactly 1 YES:  the one YES wins → profit, by design.
+  //   • 0 YES (event voided OR the actual winner isn't a listed candidate):
+  //     every YES bet expires worthless → entire stake lost.
+  //   • 2+ YES (mutex failure):  multiple YESs win → bigger profit.
+  return {
+    residualRiskOnHundred: budget,
+    residualRiskDescription:
+      "Full stake at risk if NONE of the listed markets resolves YES — i.e. the actual winner isn't on this list, or the event is voided.",
+  };
 }

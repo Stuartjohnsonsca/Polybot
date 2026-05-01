@@ -17,8 +17,13 @@ export default function OpportunityCard({
     yesBidSum,
     section,
     topOfBookReturnPct,
+    annualisedTopReturnPct,
+    daysToResolution,
+    residualRiskOnHundred,
+    residualRiskDescription,
     lp,
     lpReturnPct,
+    lpAnnualisedReturnPct,
   } = opportunity;
   const days = daysUntil(event.endDate);
   const directionLabel =
@@ -61,14 +66,19 @@ export default function OpportunityCard({
         </span>
       </div>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Hedge direction" value={directionLabel} tone="accent" />
         <Stat
           label="Top-of-book return"
           value={`${(topOfBookReturnPct * 100).toFixed(2)}%`}
+          subValue={
+            annualisedTopReturnPct !== null && daysToResolution !== null
+              ? `${(annualisedTopReturnPct * 100).toFixed(2)}% annualised (${Math.round(daysToResolution)}d)`
+              : undefined
+          }
           tone={topOfBookReturnPct > 0 ? "good" : "bad"}
           mono
-          hint="Profit / cost when filling at the best ask on every leg — i.e. spread already crossed but no slippage beyond the top level"
+          hint="Profit / cost when filling at the best ask on every leg. Calculated from buying enough shares to deploy your full budget at top-of-book, with payout from the mutex-guaranteed winning legs. Annualised = return × 365 / days_to_resolution (linear)."
         />
         <Stat
           label="LP return (live book)"
@@ -79,6 +89,11 @@ export default function OpportunityCard({
                 ? "—"
                 : "click to solve"
           }
+          subValue={
+            lpAnnualisedReturnPct !== undefined && daysToResolution !== null
+              ? `${(lpAnnualisedReturnPct * 100).toFixed(2)}% annualised (${Math.round(daysToResolution)}d)`
+              : undefined
+          }
           tone={
             lpReturnPct !== undefined && lpReturnPct > 0
               ? "good"
@@ -87,13 +102,39 @@ export default function OpportunityCard({
                 : undefined
           }
           mono
-          hint="Achievable return from the LP solver against the FULL orderbook ladder (handles fills deeper than top-of-book)"
+          hint="LP-solved against the FULL orderbook ladder, handling fills deeper than top-of-book. Worst-case profit divided by the actually-staked amount (which may be less than the $100 budget if liquidity caps hit first)."
+        />
+        <Stat
+          label="Residual risk ($100)"
+          value={
+            residualRiskOnHundred === 0
+              ? "≈ $0"
+              : `$${residualRiskOnHundred.toFixed(0)}`
+          }
+          tone={residualRiskOnHundred === 0 ? "good" : "bad"}
+          mono
+          hint={residualRiskDescription}
         />
       </div>
 
       <p className="mt-3 text-xs text-muted" title={directionRationale}>
         Why this hedge works: {directionRationale}
       </p>
+
+      <div
+        className={`mt-3 rounded border px-3 py-2 text-xs ${
+          residualRiskOnHundred === 0
+            ? "border-good/30 bg-good/5 text-good"
+            : "border-bad/30 bg-bad/5 text-bad"
+        }`}
+      >
+        <strong>
+          {residualRiskOnHundred === 0
+            ? "Residual risk: minimal."
+            : `Residual risk: $${residualRiskOnHundred.toFixed(0)} per $100 staked.`}
+        </strong>{" "}
+        {residualRiskDescription}
+      </div>
 
       {lpHasResult && (
         <div className="mt-4 rounded border border-border bg-panel2/50">
@@ -182,12 +223,14 @@ export default function OpportunityCard({
 function Stat({
   label,
   value,
+  subValue,
   tone,
   mono,
   hint,
 }: {
   label: string;
   value: string;
+  subValue?: string;
   tone?: "good" | "bad" | "accent";
   mono?: boolean;
   hint?: string;
@@ -208,6 +251,11 @@ function Stat({
       >
         {value}
       </div>
+      {subValue && (
+        <div className={`text-[10px] text-muted ${mono ? "font-mono" : ""}`}>
+          {subValue}
+        </div>
+      )}
     </div>
   );
 }
