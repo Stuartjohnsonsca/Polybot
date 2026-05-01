@@ -9,15 +9,28 @@ export default function OpportunityCard({
 }: {
   opportunity: HedgeOpportunity;
 }) {
-  const { event, edge, direction, legCount, yesPriceSum, section, estReturnPct, lp, lpReturnPct } =
-    opportunity;
+  const {
+    event,
+    direction,
+    legCount,
+    yesAskSum,
+    yesBidSum,
+    section,
+    topOfBookReturnPct,
+    lp,
+    lpReturnPct,
+  } = opportunity;
   const days = daysUntil(event.endDate);
   const directionLabel =
     direction === "BUY_ALL_NO" ? "BUY NO on every leg" : "BUY YES on every leg";
+
+  // Spread-aware rationale uses bid_YES (for BUY_ALL_NO) or ask_YES
+  // (for BUY_ALL_YES), not the mid. The arb only exists when the
+  // execution-side number clears the threshold.
   const directionRationale =
     direction === "BUY_ALL_NO"
-      ? `Σ Yes = ${(yesPriceSum * 100).toFixed(1)}¢ > 100¢ → exactly one leg resolves YES, so n−1 NO positions always win.`
-      : `Σ Yes = ${(yesPriceSum * 100).toFixed(1)}¢ < 100¢ → exactly one leg resolves YES, so one YES position always wins.`;
+      ? `Σ bid_YES = ${(yesBidSum * 100).toFixed(1)}¢ > 100¢ → buying NO on every leg costs ${(((legCount - yesBidSum) / legCount) * 100).toFixed(1)}¢ avg per leg; exactly one leg resolves YES so n−1 NOs always win.`
+      : `Σ ask_YES = ${(yesAskSum * 100).toFixed(1)}¢ < 100¢ → buying YES on every leg pays $1 (the one winner) for less than $1 of cost.`;
 
   const lpFeasible = lp?.feasible === true && lp.legStakes.length > 0;
   const lpHasResult = !!lp;
@@ -42,19 +55,20 @@ export default function OpportunityCard({
         </div>
         <span
           className="shrink-0 rounded bg-good/15 px-3 py-1 font-mono text-sm font-semibold text-good"
-          title="Pre-fee, mid-price arbitrage edge per dollar of payout coverage"
+          title="Top-of-book return on capital — already accounts for the bid-ask spread"
         >
-          +{(edge * 100).toFixed(1)}¢
+          +{(topOfBookReturnPct * 100).toFixed(2)}%
         </span>
       </div>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
         <Stat label="Hedge direction" value={directionLabel} tone="accent" />
         <Stat
-          label="Mid-price return"
-          value={`${(estReturnPct * 100).toFixed(2)}%`}
+          label="Top-of-book return"
+          value={`${(topOfBookReturnPct * 100).toFixed(2)}%`}
+          tone={topOfBookReturnPct > 0 ? "good" : "bad"}
           mono
-          hint="Estimated profit / staked at mid prices, before slippage"
+          hint="Profit / cost when filling at the best ask on every leg — i.e. spread already crossed but no slippage beyond the top level"
         />
         <Stat
           label="LP return (live book)"
@@ -73,7 +87,7 @@ export default function OpportunityCard({
                 : undefined
           }
           mono
-          hint="Achievable return from the LP solver against live orderbook depth (only top 10 candidates are auto-solved)"
+          hint="Achievable return from the LP solver against the FULL orderbook ladder (handles fills deeper than top-of-book)"
         />
       </div>
 

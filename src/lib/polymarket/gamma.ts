@@ -40,6 +40,19 @@ export function normaliseMarket(m: GammaMarketRaw): PolyMarket {
   const noIdx = outcomes.findIndex((o) => o.toLowerCase() === "no");
   const noTokenId = noIdx >= 0 && noIdx < tokenIds.length ? tokenIds[noIdx] : null;
 
+  // Gamma's bestBid/bestAsk are the top-of-book quotes for the YES token.
+  // They diverge from yesPrice (which is the mid / last trade) by the
+  // half-spread. We capture them here so opportunity detection and
+  // ranking can use real execution prices instead of mid prices.
+  const yesBestBid =
+    typeof m.bestBid === "number" && m.bestBid > 0 && m.bestBid < 1
+      ? m.bestBid
+      : null;
+  const yesBestAsk =
+    typeof m.bestAsk === "number" && m.bestAsk > 0 && m.bestAsk < 1
+      ? m.bestAsk
+      : null;
+
   return {
     id: m.id,
     conditionId: m.conditionId,
@@ -48,6 +61,8 @@ export function normaliseMarket(m: GammaMarketRaw): PolyMarket {
     outcomes,
     outcomePrices,
     yesPrice,
+    yesBestBid,
+    yesBestAsk,
     yesTokenId,
     noTokenId,
     volume: toNumber(m.volumeNum ?? m.volume),

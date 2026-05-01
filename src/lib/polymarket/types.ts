@@ -67,7 +67,9 @@ export interface PolyMarket {
   slug: string;
   outcomes: string[]; // typically ["Yes", "No"]
   outcomePrices: number[]; // aligned with outcomes
-  yesPrice: number | null; // convenience: price of the "Yes" outcome
+  yesPrice: number | null; // mid / last trade price of the "Yes" outcome
+  yesBestBid: number | null; // top-of-book bid for YES — sell-side execution
+  yesBestAsk: number | null; // top-of-book ask for YES — buy-side execution
   yesTokenId: string | null;
   noTokenId: string | null;
   volume: number;

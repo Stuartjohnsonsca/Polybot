@@ -1,22 +1,25 @@
 // Auto-discover hedge opportunities across Polymarket events.
 //
-// Two-stage detection:
-//   1. Fast scan — find mutex events whose mid-price Yes sums diverge
-//      from $1, ranked by estimated return on capital. This is cheap
-//      (no orderbook fetches) and prunes the catalogue down to 10ish
-//      genuine candidates.
-//   2. Per-candidate LP — for the top 10, build the canonical basket
-//      ("exactly 1 YES" thesis on every leg, $100 budget) and run the
-//      LP solver against the live CLOB orderbook ladders. The LP-derived
-//      stats include real-liquidity worst-case profit, the per-leg side
-//      the optimiser actually wants to take, and any warnings (clipped
-//      liquidity, dominated legs, etc.).
+// All math here is execution-price (top-of-book ask) — NOT mid-price.
+// A 2¢ mid-price edge can disappear entirely once you cross a 5¢ spread,
+// so we filter and rank purely on what you can actually fill at.
 //
-// The page-level revalidate=60s caches the whole computation so we
-// don't re-solve 10 LPs on every request.
+// Buying YES costs the YES token's best ask. Buying NO costs the NO
+// token's best ask, which we approximate as `1 − bid_YES` (the price you
+// could effectively buy NO at by selling YES via the linked CLOB —
+// Polymarket's conditional-tokens framework keeps these aligned within
+// fractions of a cent for liquid markets).
+//
+// Real arbitrage tests (no spread crossings, no fees beyond gas):
+//   • BUY all NO  ⇔  Σ ask_NO < n − 1  ⇔  Σ bid_YES > 1
+//   • BUY all YES ⇔  Σ ask_YES < 1
+//
+// Mutex events satisfying either yield risk-free profit at top-of-book.
+// We rank by return on capital and feed the top-N to the LP solver,
+// which then walks the full ladder for the achievable size.
 
 import { listEvents } from "./polymarket/gamma";
-import type { PolyEvent, Section } from "./polymarket/types";
+import type { PolyEvent, Section, PolyMarket } from "./polymarket/types";
 import { optimiseBasket } from "./optimiser";
 import type { Basket, OptimiseResult } from "./optimiser/types";
 
@@ -26,22 +29,43 @@ export interface HedgeOpportunity {
   event: PolyEvent;
   section: Section;
   legCount: number;
-  yesPriceSum: number;
-  edge: number; // |Σ Yes − 1|
+  // Execution-price aggregates (what you actually pay):
+  yesAskSum: number; // Σ ask_YES across legs
+  yesBidSum: number; // Σ bid_YES across legs
+  midYesSum: number; // Σ mid_YES — kept for reference / display only
+  edge: number; // top-of-book arbitrage edge in $/payout coverage
   direction: HedgeDirection;
-  // Mid-price estimates (cheap, what we use to rank).
-  estReturnPct: number;
+  // Return on capital at top-of-book asks ($1 stake → estReturnPct profit).
+  topOfBookReturnPct: number;
   estProfitOnHundred: number;
-  // LP-derived results against live orderbook ladders ($100 budget).
-  // Populated only for the top-N candidates we actually solve.
+  // LP-derived results (live ladder, $100 budget). Only populated for
+  // the top-N candidates we actually solve.
   lp?: OptimiseResult;
-  lpReturnPct?: number; // lp.worstCaseProfit / lp.totalStaked, if both > 0
+  lpReturnPct?: number;
 }
 
-const MIN_EDGE = 0.005;
+const MIN_EDGE_PCT = 0.001; // 0.1% return — anything tighter is noise/fees
 const MAX_LEGS_FOR_OPPORTUNITY = 14;
 const TOP_N_TO_SOLVE = 10;
 const DEFAULT_LP_BUDGET = 100;
+
+interface PricedMarket extends PolyMarket {
+  yesBestBid: number;
+  yesBestAsk: number;
+}
+
+function isPriced(m: PolyMarket): m is PricedMarket {
+  return (
+    typeof m.yesBestBid === "number" &&
+    typeof m.yesBestAsk === "number" &&
+    m.yesBestBid > 0 &&
+    m.yesBestAsk > 0 &&
+    m.yesBestAsk < 1 &&
+    m.yesBestBid < m.yesBestAsk &&
+    !!m.yesTokenId &&
+    !!m.noTokenId
+  );
+}
 
 export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
   const [politics, forex] = await Promise.all([
@@ -58,49 +82,61 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
 
   for (const { events, section } of buckets) {
     for (const event of events) {
-      if (!event.negRisk) continue;
-      const priced = event.markets.filter(
-        (m): m is typeof m & { yesPrice: number } =>
-          typeof m.yesPrice === "number" &&
-          m.yesPrice > 0 &&
-          m.yesPrice < 1 &&
-          !!m.yesTokenId &&
-          !!m.noTokenId,
-      );
+      if (!event.negRisk) continue; // only mutex events have a clean self-hedge
+
+      const priced = event.markets.filter(isPriced);
       if (priced.length < 2) continue;
       if (priced.length > MAX_LEGS_FOR_OPPORTUNITY) continue;
 
-      const yesPriceSum = priced.reduce((s, m) => s + m.yesPrice, 0);
-      const edge = Math.abs(yesPriceSum - 1);
-      if (edge < MIN_EDGE) continue;
-
-      const direction: HedgeDirection = yesPriceSum > 1 ? "BUY_ALL_NO" : "BUY_ALL_YES";
       const n = priced.length;
-      const estReturnPct =
-        direction === "BUY_ALL_NO"
-          ? (yesPriceSum - 1) / (n - yesPriceSum)
-          : (1 - yesPriceSum) / yesPriceSum;
+      const yesAskSum = priced.reduce((s, m) => s + m.yesBestAsk, 0);
+      const yesBidSum = priced.reduce((s, m) => s + m.yesBestBid, 0);
+      const midYesSum = priced.reduce(
+        (s, m) => s + (m.yesPrice ?? (m.yesBestBid + m.yesBestAsk) / 2),
+        0,
+      );
+
+      // Test BUY_ALL_NO arb: cost = Σ ask_NO ≈ Σ (1 − bid_YES) = n − Σ bid.
+      // Profit per share = (n−1) − cost; per $1 stake = profit/cost.
+      const buyAllNoCost = n - yesBidSum;
+      const buyAllNoProfit = n - 1 - buyAllNoCost; // = yesBidSum − 1
+      const buyAllNoReturn =
+        buyAllNoCost > 0 ? buyAllNoProfit / buyAllNoCost : -Infinity;
+
+      // Test BUY_ALL_YES arb: cost = Σ ask_YES, payout = $1.
+      const buyAllYesCost = yesAskSum;
+      const buyAllYesProfit = 1 - buyAllYesCost;
+      const buyAllYesReturn =
+        buyAllYesCost > 0 ? buyAllYesProfit / buyAllYesCost : -Infinity;
+
+      // Pick the better of the two real-execution arb options.
+      const noBeatsYes = buyAllNoReturn > buyAllYesReturn;
+      const direction: HedgeDirection = noBeatsYes ? "BUY_ALL_NO" : "BUY_ALL_YES";
+      const topOfBookReturnPct = noBeatsYes ? buyAllNoReturn : buyAllYesReturn;
+      const edge = noBeatsYes ? buyAllNoProfit : buyAllYesProfit;
+
+      // Only keep the candidate if the top-of-book arb actually clears.
+      if (topOfBookReturnPct < MIN_EDGE_PCT) continue;
+      if (edge <= 0) continue;
 
       candidates.push({
         event,
         section,
         legCount: n,
-        yesPriceSum,
+        yesAskSum,
+        yesBidSum,
+        midYesSum,
         edge,
         direction,
-        estReturnPct,
-        estProfitOnHundred: 100 * estReturnPct,
+        topOfBookReturnPct,
+        estProfitOnHundred: 100 * topOfBookReturnPct,
       });
     }
   }
 
-  candidates.sort((a, b) => b.estReturnPct - a.estReturnPct);
+  candidates.sort((a, b) => b.topOfBookReturnPct - a.topOfBookReturnPct);
 
-  // Stage 2 — LP-solve the top N in parallel against live orderbook depth.
-  // Each solve fetches per-token order books, builds the LP, and returns
-  // the achievable worst-case profit + the per-leg trades the optimiser
-  // actually picks. We swallow individual solve failures so a single
-  // upstream hiccup doesn't drop the whole list.
+  // Stage 2 — LP solve top-N against live full orderbook ladder.
   const topToSolve = candidates.slice(0, TOP_N_TO_SOLVE);
   const solved = await Promise.all(
     topToSolve.map(async (c) => {
@@ -122,11 +158,11 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
     }),
   );
 
-  // Re-rank by the LP-derived return where we have it; fall back to the
-  // mid-price estimate for ties or unsolved candidates.
+  // Re-rank by the LP-derived return where we have it; fall back to
+  // top-of-book for unsolved candidates (demoted slightly).
   solved.sort((a, b) => {
-    const ra = a.lpReturnPct ?? a.estReturnPct - 0.5; // unsolved demoted
-    const rb = b.lpReturnPct ?? b.estReturnPct - 0.5;
+    const ra = a.lpReturnPct ?? a.topOfBookReturnPct - 0.5;
+    const rb = b.lpReturnPct ?? b.topOfBookReturnPct - 0.5;
     return rb - ra;
   });
 
