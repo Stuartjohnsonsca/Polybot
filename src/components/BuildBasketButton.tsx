@@ -17,12 +17,15 @@ import {
 import { persistBasket } from "@/app/basket/actions";
 import type { Section } from "@/lib/polymarket/types";
 import type { OpportunityLeg } from "@/lib/opportunities";
+import type { ThesisPredicate } from "@/lib/optimiser/types";
 
 export interface BuildBasketButtonProps {
   legs: OpportunityLeg[];
   section: Section;
   eventTitle: string;
-  thesisLabel?: string; // e.g. "exactly 1 YES (mutex)"
+  // Thesis the LP picked as best for this opportunity. Falls back to
+  // strict mutex if not supplied.
+  thesisPredicates?: ThesisPredicate[];
   size?: "sm" | "md";
 }
 
@@ -30,6 +33,7 @@ export default function BuildBasketButton({
   legs,
   section,
   eventTitle,
+  thesisPredicates,
   size = "md",
 }: BuildBasketButtonProps) {
   const router = useRouter();
@@ -52,10 +56,14 @@ export default function BuildBasketButton({
         for (const leg of legs) {
           addLegToBasket({ ...leg, section });
         }
-        // Mutex events: exactly one market resolves YES. The LP will pick
-        // BUY NO or BUY YES per leg from the orderbook depending on the
-        // arb direction.
-        setThesisPredicates([{ kind: "exactlyK", k: 1 }]);
+        // Use the LP-picked thesis if supplied — falls back to strict
+        // mutex ("exactly 1 YES") for callers that haven't run the
+        // multi-thesis explorer.
+        setThesisPredicates(
+          thesisPredicates && thesisPredicates.length > 0
+            ? thesisPredicates
+            : [{ kind: "exactlyK", k: 1 }],
+        );
 
         const snap = getBasketSnapshot();
         if (snap) {

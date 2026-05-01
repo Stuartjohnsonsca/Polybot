@@ -21,7 +21,47 @@
 import { listEvents } from "./polymarket/gamma";
 import type { PolyEvent, Section, PolyMarket } from "./polymarket/types";
 import { optimiseBasket } from "./optimiser";
-import type { Basket, OptimiseResult } from "./optimiser/types";
+import type {
+  Basket,
+  OptimiseResult,
+  ThesisPredicate,
+} from "./optimiser/types";
+
+// Thesis variations the auto-explorer tries for each candidate. The LP
+// solves all applicable ones (filtered by minLegs) and we surface the
+// best return. Different theses give the LP different freedom to skew
+// the per-leg allocation — uniform sizing is provably optimal under
+// "exactly 1 YES" but relaxing to "at most 1 YES" forces the LP to
+// hedge the 0-YES tail too, which often produces a different (and
+// sometimes better risk-adjusted) skewed allocation.
+interface ThesisVariation {
+  label: string;
+  predicates: ThesisPredicate[];
+  minLegs: number;
+}
+
+const THESIS_VARIATIONS: ThesisVariation[] = [
+  {
+    label: "exactly 1 YES (strict mutex)",
+    predicates: [{ kind: "exactlyK", k: 1 }],
+    minLegs: 2,
+  },
+  {
+    label: "at most 1 YES (allows 0-YES tail)",
+    predicates: [{ kind: "atMostK", k: 1 }],
+    minLegs: 2,
+  },
+  {
+    label: "at most 2 YES",
+    predicates: [{ kind: "atMostK", k: 2 }],
+    minLegs: 5,
+  },
+  {
+    label: "at most 3 YES",
+    predicates: [{ kind: "atMostK", k: 3 }],
+    minLegs: 8,
+  },
+];
 
 export type HedgeDirection = "BUY_ALL_NO" | "BUY_ALL_YES";
 
@@ -48,6 +88,18 @@ export interface HedgeOpportunity {
   // Multiply by the actual stake to get a dollar amount.
   residualRiskFraction: number;
   residualRiskDescription: string;
+  // The thesis variant the LP picked (best LP return across the set
+  // of variants we try). Used to construct the basket on click.
+  chosenThesisLabel?: string;
+  chosenThesisPredicates?: ThesisPredicate[];
+  // Returns under each tried thesis, ordered by LP return desc — useful
+  // for showing the user the alternatives that came close.
+  thesisAttempts?: Array<{
+    label: string;
+    feasible: boolean;
+    returnPct?: number;
+    maxExecutable?: number;
+  }>;
   // LP-derived results (live ladder, large budget). Only populated for
   // the top-N candidates we actually solve.
   lp?: OptimiseResult;
@@ -154,8 +206,14 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
         daysToResolution !== null && daysToResolution > 0
           ? topOfBookReturnPct * (365 / daysToResolution)
           : null;
-      const { residualRiskFraction, residualRiskDescription } =
-        computeResidualRisk(direction);
+      // Stage-1 candidates (not LP-solved yet) get residual risk under
+      // the strictest thesis we'd default to ("exactly 1 YES"). If the
+      // candidate makes it into the top-N, this is overwritten in the
+      // solve loop with the LP-chosen thesis.
+      const { residualRiskFraction, residualRiskDescription } = computeResidualRisk(
+        direction,
+        [{ kind: "exactlyK", k: 1 }],
+      );
 
       candidates.push({
         event,
@@ -183,28 +241,70 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
   const solved = await Promise.all(
     topToSolve.map(async (c) => {
       try {
-        const basket = syntheticBasketForOpportunity(c);
-        const lp = await optimiseBasket(basket);
-        const lpReturnPct =
-          lp.feasible && lp.totalStaked > 0
-            ? lp.worstCaseProfit / lp.totalStaked
-            : undefined;
+        // Try every thesis variation that fits the leg count, in
+        // parallel — the LP solver is fast enough that we can afford
+        // ~4 solves per candidate. The winner is the highest LP return
+        // (worst-case profit / actually-staked).
+        const applicable = THESIS_VARIATIONS.filter(
+          (t) => c.legCount >= t.minLegs,
+        );
+        const attempts = await Promise.all(
+          applicable.map(async (variation) => {
+            const basket = syntheticBasketForOpportunity(c, variation.predicates);
+            const lp = await optimiseBasket(basket);
+            const returnPct =
+              lp.feasible && lp.totalStaked > 0
+                ? lp.worstCaseProfit / lp.totalStaked
+                : undefined;
+            const maxExecutable = lp.feasible ? lp.totalStaked : undefined;
+            return { variation, lp, returnPct, maxExecutable };
+          }),
+        );
+
+        const ranked = [...attempts].sort((a, b) => {
+          const ra = a.returnPct ?? -Infinity;
+          const rb = b.returnPct ?? -Infinity;
+          return rb - ra;
+        });
+        const best = ranked[0];
+        if (!best || best.returnPct === undefined) {
+          // No thesis produced a feasible profitable solve.
+          return c;
+        }
+
+        const basketBudget = LP_PROBE_BUDGET;
         const lpAnnualisedReturnPct =
-          lpReturnPct !== undefined &&
-          c.daysToResolution !== null &&
-          c.daysToResolution > 0
-            ? lpReturnPct * (365 / c.daysToResolution)
+          c.daysToResolution !== null && c.daysToResolution > 0
+            ? best.returnPct * (365 / c.daysToResolution)
             : undefined;
-        const lpMaxExecutable = lp.feasible ? lp.totalStaked : undefined;
         const liquidityCapped =
-          lpMaxExecutable !== undefined &&
-          lpMaxExecutable < basket.budget * LIQUIDITY_CAPPED_THRESHOLD;
+          best.maxExecutable !== undefined &&
+          best.maxExecutable < basketBudget * LIQUIDITY_CAPPED_THRESHOLD;
+
+        // Re-derive residual risk against the WINNING thesis. If the
+        // chosen thesis already includes the 0-YES scenario, the LP's
+        // allocation hedges it — residual risk drops to ≈ 0 in that
+        // case (only the impossible 2+-YES path remains uncovered on
+        // negRisk markets).
+        const { residualRiskFraction, residualRiskDescription } =
+          computeResidualRisk(c.direction, best.variation.predicates);
+
         return {
           ...c,
-          lp,
-          lpReturnPct,
+          residualRiskFraction,
+          residualRiskDescription,
+          chosenThesisLabel: best.variation.label,
+          chosenThesisPredicates: best.variation.predicates,
+          thesisAttempts: ranked.map((a) => ({
+            label: a.variation.label,
+            feasible: !!a.lp.feasible && a.returnPct !== undefined,
+            returnPct: a.returnPct,
+            maxExecutable: a.maxExecutable,
+          })),
+          lp: best.lp,
+          lpReturnPct: best.returnPct,
           lpAnnualisedReturnPct,
-          lpMaxExecutable,
+          lpMaxExecutable: best.maxExecutable,
           liquidityCapped,
         };
       } catch (err) {
@@ -228,7 +328,10 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
   return [...solved, ...candidates.slice(TOP_N_TO_SOLVE)];
 }
 
-function syntheticBasketForOpportunity(o: HedgeOpportunity): Basket {
+function syntheticBasketForOpportunity(
+  o: HedgeOpportunity,
+  predicates: ThesisPredicate[],
+): Basket {
   return {
     id: `auto-${o.event.id}`,
     name: o.event.title,
@@ -237,7 +340,7 @@ function syntheticBasketForOpportunity(o: HedgeOpportunity): Basket {
       ...l,
       preferredSide: "EITHER",
     })),
-    thesis: { predicates: [{ kind: "exactlyK", k: 1 }] },
+    thesis: { predicates },
     // Probe at $10k so liquidity caps actually surface — the LP won't
     // deploy any dollar that hurts worst-case profit, so over-providing
     // budget is harmless and the resulting totalStaked is the real
@@ -275,32 +378,48 @@ function computeDaysToResolution(endDate?: string): number | null {
   return days;
 }
 
-function computeResidualRisk(direction: HedgeDirection): {
+function computeResidualRisk(
+  direction: HedgeDirection,
+  predicates: ThesisPredicate[] = [],
+): {
   residualRiskFraction: number;
   residualRiskDescription: string;
 } {
-  if (direction === "BUY_ALL_NO") {
-    // Buying NO on every leg of a mutex event:
-    //   • Exactly 1 YES (normal mutex):  n−1 NOs win → profit, by design.
-    //   • 0 YES (no listed winner / event voided):  all n NOs win → bigger
-    //     profit than the 1-YES case. Upside, not risk.
-    //   • 2+ YES (would require Polymarket's mutex to fail):  multiple NOs
-    //     lose. Polymarket's negRisk mechanism enforces mutex resolution
-    //     on-chain, so this is effectively unreachable.
+  // Does the thesis admit the 0-YES scenario? "exactly K YES" with K>0
+  // forbids it; everything else (atMostK, implies, no predicates) lets
+  // it through. When the thesis admits 0-YES, the LP's allocation has
+  // already hedged that scenario, so it's no longer residual risk.
+  const thesisAdmitsZeroYes = !predicates.some(
+    (p) => p.kind === "exactlyK" && p.k > 0,
+  );
+
+  if (thesisAdmitsZeroYes) {
     return {
       residualRiskFraction: 0,
       residualRiskDescription:
-        "Effectively zero. The hedge wins (or wins more) in every legitimate resolution. Multiple-YES would require Polymarket's on-chain mutex mechanism to fail.",
+        "Effectively zero — the chosen thesis includes the 0-YES scenario, so the LP allocation already hedges it. The only remaining outcome outside the thesis is multiple legs resolving YES, which Polymarket's on-chain negRisk mechanism prevents.",
     };
   }
-  // BUY_ALL_YES — buying YES on every leg.
-  //   • Exactly 1 YES:  the one YES wins → profit, by design.
-  //   • 0 YES (event voided OR the actual winner isn't a listed candidate):
-  //     every YES bet expires worthless → entire stake lost.
-  //   • 2+ YES (mutex failure):  multiple YESs win → bigger profit.
+
+  if (direction === "BUY_ALL_NO") {
+    // Strict thesis (exactly K YES, K>0). For BUY_ALL_NO under exactly 1:
+    //   • The 1-YES path is in-thesis, hedged by the LP.
+    //   • 0 YES is OUT of thesis but is upside (all n NOs win) so no
+    //     real residual loss.
+    //   • 2+ YES is the impossible-on-Polymarket path.
+    return {
+      residualRiskFraction: 0,
+      residualRiskDescription:
+        "Effectively zero. The strict thesis covers the 1-YES path; 0-YES would be additional upside, not loss; 2+ YES would require Polymarket's negRisk mutex to fail.",
+    };
+  }
+
+  // BUY_ALL_YES under a strict thesis (exactly K YES, K>0). The 0-YES
+  // scenario is out of thesis: every YES bet expires worthless → full
+  // stake lost.
   return {
     residualRiskFraction: 1,
     residualRiskDescription:
-      "Full stake at risk if NONE of the listed markets resolves YES — i.e. the actual winner isn't on this list, or the event is voided.",
+      "Full stake at risk if NONE of the listed markets resolves YES — i.e. the actual winner isn't on this list, or the event is voided. The chosen strict thesis doesn't hedge the 0-YES tail.",
   };
 }

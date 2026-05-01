@@ -21,6 +21,9 @@ export default function OpportunityCard({
     daysToResolution,
     residualRiskFraction,
     residualRiskDescription,
+    chosenThesisLabel,
+    chosenThesisPredicates,
+    thesisAttempts,
     lp,
     lpReturnPct,
     lpAnnualisedReturnPct,
@@ -62,6 +65,17 @@ export default function OpportunityCard({
               ends {fmtDate(event.endDate)}
               {days !== null && days >= 0 ? ` (${days}d)` : ""}
             </span>
+            {chosenThesisLabel && (
+              <>
+                <span>·</span>
+                <span
+                  className="rounded bg-accent2/10 px-1.5 py-0.5 text-[10px] font-medium text-accent2"
+                  title={`The LP tried multiple theses; this one produced the best return-on-capital. Click "Construct & solve" to load it into your basket.`}
+                >
+                  thesis: {chosenThesisLabel}
+                </span>
+              </>
+            )}
           </div>
         </div>
         <span
@@ -167,6 +181,37 @@ export default function OpportunityCard({
         </div>
       )}
 
+      {thesisAttempts && thesisAttempts.length > 1 && (
+        <details className="mt-3 rounded border border-border bg-panel2/30 text-xs">
+          <summary className="cursor-pointer px-3 py-1.5 text-muted hover:text-text">
+            Thesis comparison ({thesisAttempts.length} tried)
+          </summary>
+          <ul className="divide-y divide-border">
+            {thesisAttempts.map((a, i) => (
+              <li
+                key={a.label}
+                className="grid grid-cols-[1fr_auto_auto] items-center gap-3 px-3 py-1.5"
+              >
+                <span className={i === 0 ? "text-text" : "text-muted"}>
+                  {i === 0 && "★ "}
+                  {a.label}
+                </span>
+                <span className="font-mono text-muted">
+                  {a.feasible && a.returnPct !== undefined
+                    ? `${(a.returnPct * 100).toFixed(2)}%`
+                    : "infeasible"}
+                </span>
+                <span className="font-mono text-muted">
+                  {a.maxExecutable !== undefined
+                    ? `up to ${fmtUsd(a.maxExecutable, { compact: a.maxExecutable >= 1000 })}`
+                    : "—"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
       {lpHasResult && (
         <div className="mt-4 rounded border border-border bg-panel2/50">
           <div className="flex items-center justify-between border-b border-border px-3 py-2 text-xs">
@@ -245,6 +290,7 @@ export default function OpportunityCard({
           legs={legsForOpportunity(opportunity)}
           section={section}
           eventTitle={event.title}
+          thesisPredicates={chosenThesisPredicates}
         />
       </div>
     </div>
