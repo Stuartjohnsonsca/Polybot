@@ -43,26 +43,41 @@ export interface HedgeOpportunity {
   // and avoids overstating compound return on already-tiny edges.
   daysToResolution: number | null;
   annualisedTopReturnPct: number | null;
-  // Residual risk: dollars at risk on a $100 stake if the
-  // unhedged-by-mutex scenario occurs. For BUY_ALL_NO this is the
-  // "more than 1 leg resolves YES" case — Polymarket's negRisk
-  // mechanism enforces mutex on-chain, so this is effectively zero.
-  // For BUY_ALL_YES it's the "0 legs resolve YES" case (event voided
-  // or actual winner isn't in the listed candidates) — full stake
-  // wiped out.
-  residualRiskOnHundred: number;
+  // Residual risk fraction (0..1) of stake at risk if the
+  // unhedged-by-mutex scenario occurs. BUY_ALL_NO ≈ 0; BUY_ALL_YES = 1.
+  // Multiply by the actual stake to get a dollar amount.
+  residualRiskFraction: number;
   residualRiskDescription: string;
-  // LP-derived results (live ladder, $100 budget). Only populated for
+  // LP-derived results (live ladder, large budget). Only populated for
   // the top-N candidates we actually solve.
   lp?: OptimiseResult;
   lpReturnPct?: number;
   lpAnnualisedReturnPct?: number;
+  // Liquidity assessment from the LP solve at the probe budget.
+  // - lpMaxExecutable: dollars the LP would actually deploy at the
+  //   probe budget. Equals totalStaked. If smaller than the budget by
+  //   a meaningful margin, the basket is liquidity-bound — that's the
+  //   most you can deploy at the displayed return rate.
+  // - liquidityCapped: true when the LP couldn't use the whole budget.
+  // - totalBookDepth: $ depth of the relevant ask side across all
+  //   legs, derived directly from the orderbook ladders. Independent
+  //   of LP allocation; gives an absolute upper bound on size before
+  //   you'd exhaust visible liquidity.
+  lpMaxExecutable?: number;
+  liquidityCapped?: boolean;
 }
 
 const MIN_EDGE_PCT = 0.001; // 0.1% return — anything tighter is noise/fees
 const MAX_LEGS_FOR_OPPORTUNITY = 14;
 const TOP_N_TO_SOLVE = 10;
-const DEFAULT_LP_BUDGET = 100;
+// Probe budget large enough that liquidity caps actually bind on most
+// markets — that's the only way the LP-derived totalStaked tells us the
+// real deployable size. The LP won't use a dollar that hurts worst-case
+// profit, so over-providing budget is harmless.
+const LP_PROBE_BUDGET = 10_000;
+// Liquidity cap is "binding" if the LP couldn't deploy at least 90% of
+// the probe budget — pick a margin large enough to not flag rounding.
+const LIQUIDITY_CAPPED_THRESHOLD = 0.9;
 
 interface PricedMarket extends PolyMarket {
   yesBestBid: number;
@@ -139,10 +154,8 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
         daysToResolution !== null && daysToResolution > 0
           ? topOfBookReturnPct * (365 / daysToResolution)
           : null;
-      const { residualRiskOnHundred, residualRiskDescription } = computeResidualRisk(
-        direction,
-        100,
-      );
+      const { residualRiskFraction, residualRiskDescription } =
+        computeResidualRisk(direction);
 
       candidates.push({
         event,
@@ -157,7 +170,7 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
         estProfitOnHundred: 100 * topOfBookReturnPct,
         daysToResolution,
         annualisedTopReturnPct,
-        residualRiskOnHundred,
+        residualRiskFraction,
         residualRiskDescription,
       });
     }
@@ -182,7 +195,18 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
           c.daysToResolution > 0
             ? lpReturnPct * (365 / c.daysToResolution)
             : undefined;
-        return { ...c, lp, lpReturnPct, lpAnnualisedReturnPct };
+        const lpMaxExecutable = lp.feasible ? lp.totalStaked : undefined;
+        const liquidityCapped =
+          lpMaxExecutable !== undefined &&
+          lpMaxExecutable < basket.budget * LIQUIDITY_CAPPED_THRESHOLD;
+        return {
+          ...c,
+          lp,
+          lpReturnPct,
+          lpAnnualisedReturnPct,
+          lpMaxExecutable,
+          liquidityCapped,
+        };
       } catch (err) {
         console.error(
           `[polybot] failed to LP-solve opportunity ${c.event.slug}:`,
@@ -214,7 +238,11 @@ function syntheticBasketForOpportunity(o: HedgeOpportunity): Basket {
       preferredSide: "EITHER",
     })),
     thesis: { predicates: [{ kind: "exactlyK", k: 1 }] },
-    budget: DEFAULT_LP_BUDGET,
+    // Probe at $10k so liquidity caps actually surface — the LP won't
+    // deploy any dollar that hurts worst-case profit, so over-providing
+    // budget is harmless and the resulting totalStaked is the real
+    // assessment of how much depth the basket can absorb at that rate.
+    budget: LP_PROBE_BUDGET,
   };
 }
 
@@ -247,10 +275,10 @@ function computeDaysToResolution(endDate?: string): number | null {
   return days;
 }
 
-function computeResidualRisk(
-  direction: HedgeDirection,
-  budget: number,
-): { residualRiskOnHundred: number; residualRiskDescription: string } {
+function computeResidualRisk(direction: HedgeDirection): {
+  residualRiskFraction: number;
+  residualRiskDescription: string;
+} {
   if (direction === "BUY_ALL_NO") {
     // Buying NO on every leg of a mutex event:
     //   • Exactly 1 YES (normal mutex):  n−1 NOs win → profit, by design.
@@ -260,19 +288,18 @@ function computeResidualRisk(
     //     lose. Polymarket's negRisk mechanism enforces mutex resolution
     //     on-chain, so this is effectively unreachable.
     return {
-      residualRiskOnHundred: 0,
+      residualRiskFraction: 0,
       residualRiskDescription:
         "Effectively zero. The hedge wins (or wins more) in every legitimate resolution. Multiple-YES would require Polymarket's on-chain mutex mechanism to fail.",
     };
   }
-  // BUY_ALL_YES
-  // Buying YES on every leg:
+  // BUY_ALL_YES — buying YES on every leg.
   //   • Exactly 1 YES:  the one YES wins → profit, by design.
   //   • 0 YES (event voided OR the actual winner isn't a listed candidate):
   //     every YES bet expires worthless → entire stake lost.
   //   • 2+ YES (mutex failure):  multiple YESs win → bigger profit.
   return {
-    residualRiskOnHundred: budget,
+    residualRiskFraction: 1,
     residualRiskDescription:
       "Full stake at risk if NONE of the listed markets resolves YES — i.e. the actual winner isn't on this list, or the event is voided.",
   };

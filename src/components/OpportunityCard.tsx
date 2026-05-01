@@ -19,12 +19,18 @@ export default function OpportunityCard({
     topOfBookReturnPct,
     annualisedTopReturnPct,
     daysToResolution,
-    residualRiskOnHundred,
+    residualRiskFraction,
     residualRiskDescription,
     lp,
     lpReturnPct,
     lpAnnualisedReturnPct,
+    lpMaxExecutable,
+    liquidityCapped,
   } = opportunity;
+  // Risk shown at the LP-derived deployable size when we have one,
+  // otherwise normalised to a $100 reference stake.
+  const stakeForRiskCalc = lpMaxExecutable ?? 100;
+  const residualRiskUsd = residualRiskFraction * stakeForRiskCalc;
   const days = daysUntil(event.endDate);
   const directionLabel =
     direction === "BUY_ALL_NO" ? "BUY NO on every leg" : "BUY YES on every leg";
@@ -102,18 +108,29 @@ export default function OpportunityCard({
                 : undefined
           }
           mono
-          hint="LP-solved against the FULL orderbook ladder, handling fills deeper than top-of-book. Worst-case profit divided by the actually-staked amount (which may be less than the $100 budget if liquidity caps hit first)."
+          hint="LP-solved against the FULL orderbook ladder, handling fills deeper than top-of-book. Worst-case profit divided by the actually-staked amount."
         />
         <Stat
-          label="Residual risk ($100)"
+          label={liquidityCapped ? "Max executable (capped)" : "Max executable"}
           value={
-            residualRiskOnHundred === 0
-              ? "≈ $0"
-              : `$${residualRiskOnHundred.toFixed(0)}`
+            lpMaxExecutable !== undefined
+              ? fmtUsd(lpMaxExecutable, { compact: lpMaxExecutable >= 10000 })
+              : "—"
           }
-          tone={residualRiskOnHundred === 0 ? "good" : "bad"}
+          subValue={
+            lpMaxExecutable !== undefined && residualRiskUsd > 0
+              ? `Residual risk ${fmtUsd(residualRiskUsd, { compact: residualRiskUsd >= 1000 })}`
+              : "Residual risk ≈ $0"
+          }
+          tone={
+            liquidityCapped
+              ? "bad"
+              : lpMaxExecutable && lpMaxExecutable > 0
+                ? "good"
+                : undefined
+          }
           mono
-          hint={residualRiskDescription}
+          hint="Largest position the LP can deploy at this return rate without going below worst-case-profit. Probed at a $10,000 budget — if smaller, the basket is liquidity-bound to the displayed amount; the LP won't deploy more because deeper orderbook levels would hurt the worst-case payout."
         />
       </div>
 
@@ -123,18 +140,32 @@ export default function OpportunityCard({
 
       <div
         className={`mt-3 rounded border px-3 py-2 text-xs ${
-          residualRiskOnHundred === 0
+          residualRiskFraction === 0
             ? "border-good/30 bg-good/5 text-good"
             : "border-bad/30 bg-bad/5 text-bad"
         }`}
       >
         <strong>
-          {residualRiskOnHundred === 0
+          {residualRiskFraction === 0
             ? "Residual risk: minimal."
-            : `Residual risk: $${residualRiskOnHundred.toFixed(0)} per $100 staked.`}
+            : lpMaxExecutable !== undefined
+              ? `Residual risk: ${fmtUsd(residualRiskUsd, { compact: residualRiskUsd >= 1000 })} (full stake at LP-deployable size).`
+              : `Residual risk: 100% of stake.`}
         </strong>{" "}
         {residualRiskDescription}
       </div>
+
+      {liquidityCapped && (
+        <div className="mt-2 rounded border border-amber-400/40 bg-amber-400/5 px-3 py-2 text-xs text-amber-300">
+          <strong>Liquidity-capped.</strong>{" "}
+          The LP can only deploy{" "}
+          {lpMaxExecutable !== undefined
+            ? fmtUsd(lpMaxExecutable, { compact: lpMaxExecutable >= 1000 })
+            : "—"}{" "}
+          at this rate. Beyond that, you&apos;d cross deeper orderbook levels
+          and the return degrades.
+        </div>
+      )}
 
       {lpHasResult && (
         <div className="mt-4 rounded border border-border bg-panel2/50">
