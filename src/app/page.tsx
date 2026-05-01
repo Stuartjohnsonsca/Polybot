@@ -1,64 +1,110 @@
 import Link from "next/link";
+import { findHedgeOpportunities } from "@/lib/opportunities";
+import type { HedgeOpportunity } from "@/lib/opportunities";
+import OpportunityCard from "@/components/OpportunityCard";
 
-export const dynamic = "force-static";
+export const revalidate = 60;
 
-const SECTIONS = [
-  {
-    href: "/politics",
-    title: "Politics",
-    blurb:
-      "Elections, leadership challenges, geopolitical events. The deepest category on Polymarket and the richest hunting ground for correlated multi-leg hedges.",
-  },
-  {
-    href: "/forex",
-    title: "Forex",
-    blurb:
-      "Currency-pair price targets and central-bank-driven outcomes. Smaller catalogue but tightly defined resolution criteria.",
-  },
-];
+const TOP_N = 25;
 
-export default function Home() {
+export default async function Home() {
+  let opportunities: HedgeOpportunity[] = [];
+  let error: string | null = null;
+  try {
+    opportunities = await findHedgeOpportunities();
+  } catch (e) {
+    error = e instanceof Error ? e.message : "Failed to fetch events";
+  }
+  const top = opportunities.slice(0, TOP_N);
+
   return (
     <div className="space-y-8">
-      <section className="rounded-lg border border-border bg-panel p-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Polymarket hedge explorer</h1>
-        <p className="mt-2 max-w-2xl text-sm text-muted">
-          Browse live events, drill into the underlying markets, and surface
-          correlated baskets where a small set of legs can hedge most of the
-          outcome space. Display-only — no order execution.
+      <header>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Top hedge opportunities
+        </h1>
+        <p className="mt-2 max-w-3xl text-sm text-muted">
+          Mutually-exclusive Polymarket events whose Yes prices currently
+          sum to ≠ 100¢, ranked by estimated risk-free return on capital.
+          Click <em>Construct &amp; solve</em> on any card to populate your
+          basket and run the LP optimiser against the live orderbook
+          ladder for that event.
         </p>
-      </section>
+      </header>
 
-      <section className="grid gap-3 sm:grid-cols-2">
-        {SECTIONS.map((s) => (
-          <Link
-            key={s.href}
-            href={s.href}
-            className="group rounded-lg border border-border bg-panel p-5 transition hover:border-accent/60 hover:bg-panel2"
-          >
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-medium">{s.title}</h2>
-              <span className="text-muted group-hover:text-accent">→</span>
-            </div>
-            <p className="mt-2 text-sm text-muted">{s.blurb}</p>
-          </Link>
-        ))}
-      </section>
+      {error && (
+        <div className="rounded border border-bad/40 bg-bad/10 p-3 text-sm text-bad">
+          {error}
+        </div>
+      )}
+
+      {top.length === 0 ? (
+        <div className="rounded-lg border border-border bg-panel p-6 text-sm text-muted">
+          <p>
+            No hedge opportunities right now — every mutex event we scanned
+            is priced within 0.5¢ of arbitrage-free. Check back; pricing
+            shifts when liquidity moves around political events and
+            scheduled FX releases.
+          </p>
+          <p className="mt-3">
+            You can still browse the catalogue manually:{" "}
+            <Link href="/politics" className="underline">
+              Politics
+            </Link>{" "}
+            ·{" "}
+            <Link href="/forex" className="underline">
+              Forex
+            </Link>
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="grid gap-3">
+            {top.map((o) => (
+              <OpportunityCard key={o.event.id} opportunity={o} />
+            ))}
+          </div>
+
+          <p className="text-xs text-muted">
+            Showing top {top.length} of {opportunities.length} candidates ·
+            edges shown are pre-fee, mid-price estimates · the LP solver
+            on /basket re-computes against live orderbook depth and may
+            adjust the achievable return.
+          </p>
+        </>
+      )}
 
       <section className="rounded-lg border border-border bg-panel/50 p-5 text-sm text-muted">
-        <h3 className="mb-2 font-medium text-text">What this tool does today</h3>
+        <h3 className="mb-2 font-medium text-text">How this works</h3>
         <ul className="ml-4 list-disc space-y-1">
           <li>
-            Pulls live events from the Polymarket Gamma API, refreshed every
-            ~60 seconds.
+            <strong className="text-text">Mutex events</strong> — Polymarket
+            flags certain events (e.g.{" "}
+            <em>&quot;Who will win election X?&quot;</em>) as
+            mutually-exclusive: exactly one of the markets resolves YES.
           </li>
           <li>
-            Flags <span className="text-good">Dutch-book opportunities</span> on
-            mutually-exclusive events (Σ Yes prices &gt; 100¢).
+            When the implied Yes prices sum to <strong>more than 100¢</strong>,
+            buying NO on every leg pays a guaranteed{" "}
+            <code className="font-mono">n−1</code> dollars (since exactly{" "}
+            <code className="font-mono">n−1</code> legs resolve NO). Edge ={" "}
+            <code className="font-mono">Σ Yes − 1</code>.
           </li>
           <li>
-            Drill into any event to see all underlying markets and a hedge
-            calculator stub.
+            When the sum is <strong>less than 100¢</strong>, buying YES on
+            every leg pays a guaranteed $1 (the one winner). Edge ={" "}
+            <code className="font-mono">1 − Σ Yes</code>.
+          </li>
+          <li>
+            Both strategies are <em>self-hedging</em> — the trades cancel
+            each other&apos;s directional exposure via the mutex
+            constraint, leaving only the pricing edge as profit.
+          </li>
+          <li>
+            <strong className="text-text">Residual risks</strong> the LP
+            doesn&apos;t hedge: resolution-criteria ambiguity, liquidity
+            below the displayed depth, and Polymarket platform / oracle
+            risk.
           </li>
         </ul>
       </section>
