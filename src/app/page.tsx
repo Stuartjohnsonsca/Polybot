@@ -3,9 +3,12 @@ import { findHedgeOpportunities } from "@/lib/opportunities";
 import type { HedgeOpportunity } from "@/lib/opportunities";
 import OpportunityCard from "@/components/OpportunityCard";
 
+// Each request runs LP solves against live orderbooks, so we cache for
+// 60s. The first request after expiry takes ~5–10s while it solves the
+// top candidates; subsequent requests within the window are instant.
 export const revalidate = 60;
 
-const TOP_N = 25;
+const TOP_N = 10;
 
 export default async function Home() {
   let opportunities: HedgeOpportunity[] = [];
@@ -26,9 +29,11 @@ export default async function Home() {
         <p className="mt-2 max-w-3xl text-sm text-muted">
           Mutually-exclusive Polymarket events whose Yes prices currently
           sum to ≠ 100¢, ranked by estimated risk-free return on capital.
-          Click <em>Construct &amp; solve</em> on any card to populate your
-          basket and run the LP optimiser against the live orderbook
-          ladder for that event.
+          Each card has been pre-solved by the LP optimiser against the
+          live orderbook — the proposed trades and achievable return are
+          shown inline, so you can scan the list and pick what to act on.
+          Click <em>Construct &amp; solve</em> to drop a candidate into
+          your basket for full detail.
         </p>
       </header>
 
@@ -67,9 +72,8 @@ export default async function Home() {
 
           <p className="text-xs text-muted">
             Showing top {top.length} of {opportunities.length} candidates ·
-            edges shown are pre-fee, mid-price estimates · the LP solver
-            on /basket re-computes against live orderbook depth and may
-            adjust the achievable return.
+            mid-price edges are pre-fee estimates · LP returns reflect
+            $100 sized against live orderbook depth · refreshed every 60s.
           </p>
         </>
       )}

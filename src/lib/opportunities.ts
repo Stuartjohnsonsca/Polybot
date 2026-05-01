@@ -1,15 +1,24 @@
-// Auto-discover hedge opportunities across Polymarket events. The simple
-// (cheap) detection used here: mutually-exclusive events whose Yes prices
-// don't sum to $1.00 imply a risk-free arbitrage — buy NO on every leg
-// when Σ Yes > 1 (n−1 NOs always win, payout n−1 per share), or buy YES
-// on every leg when Σ Yes < 1 (exactly one wins, payout $1 per share).
+// Auto-discover hedge opportunities across Polymarket events.
 //
-// We skip the LP here and use mid prices; the LP runs once the user
-// constructs the basket and we have full orderbook ladders to compute
-// achievable fills under real liquidity.
+// Two-stage detection:
+//   1. Fast scan — find mutex events whose mid-price Yes sums diverge
+//      from $1, ranked by estimated return on capital. This is cheap
+//      (no orderbook fetches) and prunes the catalogue down to 10ish
+//      genuine candidates.
+//   2. Per-candidate LP — for the top 10, build the canonical basket
+//      ("exactly 1 YES" thesis on every leg, $100 budget) and run the
+//      LP solver against the live CLOB orderbook ladders. The LP-derived
+//      stats include real-liquidity worst-case profit, the per-leg side
+//      the optimiser actually wants to take, and any warnings (clipped
+//      liquidity, dominated legs, etc.).
+//
+// The page-level revalidate=60s caches the whole computation so we
+// don't re-solve 10 LPs on every request.
 
 import { listEvents } from "./polymarket/gamma";
 import type { PolyEvent, Section } from "./polymarket/types";
+import { optimiseBasket } from "./optimiser";
+import type { Basket, OptimiseResult } from "./optimiser/types";
 
 export type HedgeDirection = "BUY_ALL_NO" | "BUY_ALL_YES";
 
@@ -17,18 +26,22 @@ export interface HedgeOpportunity {
   event: PolyEvent;
   section: Section;
   legCount: number;
-  yesPriceSum: number; // sum of Yes prices across priced markets
+  yesPriceSum: number;
   edge: number; // |Σ Yes − 1|
   direction: HedgeDirection;
-  // Estimated profit on $100 budget assuming you fill at mid prices.
-  // Real fills come from the orderbook ladder; this is a top-of-funnel
-  // ranking score, not a promise.
+  // Mid-price estimates (cheap, what we use to rank).
   estReturnPct: number;
   estProfitOnHundred: number;
+  // LP-derived results against live orderbook ladders ($100 budget).
+  // Populated only for the top-N candidates we actually solve.
+  lp?: OptimiseResult;
+  lpReturnPct?: number; // lp.worstCaseProfit / lp.totalStaked, if both > 0
 }
 
-const MIN_EDGE = 0.005; // 0.5¢ — below this is noise
-const MAX_LEGS_FOR_OPPORTUNITY = 14; // matches the optimiser's full-enum cap
+const MIN_EDGE = 0.005;
+const MAX_LEGS_FOR_OPPORTUNITY = 14;
+const TOP_N_TO_SOLVE = 10;
+const DEFAULT_LP_BUDGET = 100;
 
 export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
   const [politics, forex] = await Promise.all([
@@ -41,12 +54,11 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
     { events: forex, section: "forex" },
   ];
 
-  const out: HedgeOpportunity[] = [];
+  const candidates: HedgeOpportunity[] = [];
 
   for (const { events, section } of buckets) {
     for (const event of events) {
-      if (!event.negRisk) continue; // only mutex events have a clean self-hedge
-
+      if (!event.negRisk) continue;
       const priced = event.markets.filter(
         (m): m is typeof m & { yesPrice: number } =>
           typeof m.yesPrice === "number" &&
@@ -63,18 +75,13 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
       if (edge < MIN_EDGE) continue;
 
       const direction: HedgeDirection = yesPriceSum > 1 ? "BUY_ALL_NO" : "BUY_ALL_YES";
-
-      // Profit on $B budget when filling at mid prices.
-      // BUY_ALL_NO: cost ≈ m·(n − Σp), payout = m·(n−1), so profit/cost
-      //            = (Σp − 1) / (n − Σp).
-      // BUY_ALL_YES: cost ≈ m·Σp, payout = m·1, so profit/cost = (1 − Σp)/Σp.
       const n = priced.length;
       const estReturnPct =
         direction === "BUY_ALL_NO"
           ? (yesPriceSum - 1) / (n - yesPriceSum)
           : (1 - yesPriceSum) / yesPriceSum;
 
-      out.push({
+      candidates.push({
         event,
         section,
         legCount: n,
@@ -87,11 +94,59 @@ export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
     }
   }
 
-  return out.sort((a, b) => b.estReturnPct - a.estReturnPct);
+  candidates.sort((a, b) => b.estReturnPct - a.estReturnPct);
+
+  // Stage 2 — LP-solve the top N in parallel against live orderbook depth.
+  // Each solve fetches per-token order books, builds the LP, and returns
+  // the achievable worst-case profit + the per-leg trades the optimiser
+  // actually picks. We swallow individual solve failures so a single
+  // upstream hiccup doesn't drop the whole list.
+  const topToSolve = candidates.slice(0, TOP_N_TO_SOLVE);
+  const solved = await Promise.all(
+    topToSolve.map(async (c) => {
+      try {
+        const basket = syntheticBasketForOpportunity(c);
+        const lp = await optimiseBasket(basket);
+        const lpReturnPct =
+          lp.feasible && lp.totalStaked > 0
+            ? lp.worstCaseProfit / lp.totalStaked
+            : undefined;
+        return { ...c, lp, lpReturnPct };
+      } catch (err) {
+        console.error(
+          `[polybot] failed to LP-solve opportunity ${c.event.slug}:`,
+          err,
+        );
+        return c;
+      }
+    }),
+  );
+
+  // Re-rank by the LP-derived return where we have it; fall back to the
+  // mid-price estimate for ties or unsolved candidates.
+  solved.sort((a, b) => {
+    const ra = a.lpReturnPct ?? a.estReturnPct - 0.5; // unsolved demoted
+    const rb = b.lpReturnPct ?? b.estReturnPct - 0.5;
+    return rb - ra;
+  });
+
+  return [...solved, ...candidates.slice(TOP_N_TO_SOLVE)];
 }
 
-// Trimmed leg shape suitable for client-side basket construction without
-// shipping the full PolyMarket type to the browser.
+function syntheticBasketForOpportunity(o: HedgeOpportunity): Basket {
+  return {
+    id: `auto-${o.event.id}`,
+    name: o.event.title,
+    section: o.section,
+    legs: legsForOpportunity(o).map((l) => ({
+      ...l,
+      preferredSide: "EITHER",
+    })),
+    thesis: { predicates: [{ kind: "exactlyK", k: 1 }] },
+    budget: DEFAULT_LP_BUDGET,
+  };
+}
+
 export interface OpportunityLeg {
   marketId: string;
   question: string;
