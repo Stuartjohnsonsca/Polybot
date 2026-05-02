@@ -58,7 +58,7 @@ export interface GammaEventRaw {
   tags?: GammaTag[];
 }
 
-export type Section = "politics" | "forex";
+export type Section = "politics" | "forex" | "sports";
 
 export interface PolyMarket {
   id: string;
@@ -99,6 +99,7 @@ export function deriveSection(tags: GammaTag[]): Section | null {
   for (const t of tags) {
     if (t.slug === "politics") return "politics";
     if (t.slug === "forex") return "forex";
+    if (t.slug === "sports") return "sports";
   }
   return null;
 }

@@ -59,6 +59,10 @@ export default async function Home() {
             ·{" "}
             <Link href="/forex" className="underline">
               Forex
+            </Link>{" "}
+            ·{" "}
+            <Link href="/sports" className="underline">
+              Sports
             </Link>
           </p>
         </div>

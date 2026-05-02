@@ -150,14 +150,16 @@ function isPriced(m: PolyMarket): m is PricedMarket {
 }
 
 export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
-  const [politics, forex] = await Promise.all([
+  const [politics, forex, sports] = await Promise.all([
     listEvents({ tagSlug: "politics", limit: 100 }),
     listEvents({ tagSlug: "forex", limit: 100 }),
+    listEvents({ tagSlug: "sports", limit: 100 }),
   ]);
 
   const buckets: Array<{ events: PolyEvent[]; section: Section }> = [
     { events: politics, section: "politics" },
     { events: forex, section: "forex" },
+    { events: sports, section: "sports" },
   ];
 
   const candidates: HedgeOpportunity[] = [];

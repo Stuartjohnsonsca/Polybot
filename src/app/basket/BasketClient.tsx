@@ -285,7 +285,7 @@ function EmptyState() {
         consider possible — choosing YES vs NO for each leg automatically
         based on the maths.
       </p>
-      <div className="mt-4 flex justify-center gap-2">
+      <div className="mt-4 flex flex-wrap justify-center gap-2">
         <Link
           href="/politics"
           className="rounded-md border border-border bg-panel2 px-4 py-2 text-sm hover:border-accent hover:text-accent"
@@ -297,6 +297,12 @@ function EmptyState() {
           className="rounded-md border border-border bg-panel2 px-4 py-2 text-sm hover:border-accent hover:text-accent"
         >
           Browse Forex
+        </Link>
+        <Link
+          href="/sports"
+          className="rounded-md border border-border bg-panel2 px-4 py-2 text-sm hover:border-accent hover:text-accent"
+        >
+          Browse Sports
         </Link>
       </div>
     </div>

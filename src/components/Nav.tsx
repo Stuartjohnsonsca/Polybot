@@ -23,6 +23,12 @@ export default function Nav() {
           >
             Forex
           </Link>
+          <Link
+            href="/sports"
+            className="rounded-md px-3 py-1.5 text-muted hover:bg-panel2 hover:text-text"
+          >
+            Sports
+          </Link>
           <BasketBadge />
         </nav>
       </div>
