@@ -1,19 +1,33 @@
+import { notFound } from "next/navigation";
 import { listEvents } from "@/lib/polymarket/gamma";
 import type { PolyEvent } from "@/lib/polymarket/types";
 import { hedgeEdge } from "@/lib/hedge";
 import EventCard from "@/components/EventCard";
 import SectionHeader from "@/components/SectionHeader";
 import SortControl, { parseSortKey, type SortKey } from "@/components/SortControl";
+import { SECTIONS, getSectionById } from "@/lib/sections";
 
 export const revalidate = 60;
 
 const COMPUTED_SORTS: SortKey[] = ["hedgeEdge"];
 
-export default async function ForexPage({
+// Pre-render every configured section at build time so the dynamic
+// route still gets static-generation benefits.
+export function generateStaticParams() {
+  return SECTIONS.map((s) => ({ section: s.id }));
+}
+
+export default async function SectionPage({
+  params,
   searchParams,
 }: {
+  params: Promise<{ section: string }>;
   searchParams: Promise<{ sort?: string | string[] }>;
 }) {
+  const { section: sectionId } = await params;
+  const config = getSectionById(sectionId);
+  if (!config) notFound();
+
   const sort = parseSortKey((await searchParams).sort);
   let events: PolyEvent[] = [];
   let error: string | null = null;
@@ -23,7 +37,7 @@ export default async function ForexPage({
       ? "volume24hr"
       : (sort as "volume24hr" | "liquidity" | "endDate");
     events = await listEvents({
-      tagSlug: "forex",
+      tagSlug: config.tagSlug,
       limit: computedSort ? 100 : 60,
       order: apiOrder,
       ascending: sort === "endDate",
@@ -36,13 +50,13 @@ export default async function ForexPage({
   return (
     <div>
       <SectionHeader
-        title="Forex"
-        subtitle="Currency-pair and FX-rate events on Polymarket."
+        title={config.label}
+        subtitle={config.subtitle}
         count={events.length}
       />
 
       <div className="mb-5">
-        <SortControl basePath="/forex" current={sort} />
+        <SortControl basePath={`/${config.id}`} current={sort} />
       </div>
 
       {error && (
@@ -59,8 +73,12 @@ export default async function ForexPage({
 
       {!error && events.length === 0 && (
         <p className="text-sm text-muted">
-          No forex events found. Polymarket&apos;s FX catalogue is thin —
-          check back when ECB/Fed weeks come around.
+          No {config.label.toLowerCase()} events found right now. Polymarket&apos;s
+          {" "}
+          <code className="rounded bg-panel2 px-1 py-0.5 text-xs">
+            {config.tagSlug}
+          </code>{" "}
+          tag may simply have no live events at the moment.
         </p>
       )}
     </div>

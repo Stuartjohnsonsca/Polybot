@@ -2,6 +2,7 @@ import Link from "next/link";
 import { findHedgeOpportunities } from "@/lib/opportunities";
 import type { HedgeOpportunity } from "@/lib/opportunities";
 import OpportunityCard from "@/components/OpportunityCard";
+import { SECTIONS } from "@/lib/sections";
 
 // Each request runs LP solves against live orderbooks, so we cache for
 // 60s. The first request after expiry takes ~5–10s while it solves the
@@ -53,17 +54,14 @@ export default async function Home() {
           </p>
           <p className="mt-3">
             You can still browse the catalogue manually:{" "}
-            <Link href="/politics" className="underline">
-              Politics
-            </Link>{" "}
-            ·{" "}
-            <Link href="/forex" className="underline">
-              Forex
-            </Link>{" "}
-            ·{" "}
-            <Link href="/sports" className="underline">
-              Sports
-            </Link>
+            {SECTIONS.map((s, i) => (
+              <span key={s.id}>
+                {i > 0 && " · "}
+                <Link href={`/${s.id}`} className="underline">
+                  {s.label}
+                </Link>
+              </span>
+            ))}
           </p>
         </div>
       ) : (

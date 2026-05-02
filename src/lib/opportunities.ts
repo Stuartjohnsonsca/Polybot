@@ -20,6 +20,7 @@
 
 import { listEvents } from "./polymarket/gamma";
 import type { PolyEvent, Section, PolyMarket } from "./polymarket/types";
+import { SECTIONS } from "./sections";
 import { optimiseBasket } from "./optimiser";
 import type {
   Basket,
@@ -150,17 +151,25 @@ function isPriced(m: PolyMarket): m is PricedMarket {
 }
 
 export async function findHedgeOpportunities(): Promise<HedgeOpportunity[]> {
-  const [politics, forex, sports] = await Promise.all([
-    listEvents({ tagSlug: "politics", limit: 100 }),
-    listEvents({ tagSlug: "forex", limit: 100 }),
-    listEvents({ tagSlug: "sports", limit: 100 }),
-  ]);
+  // Fan out to every configured section's tag in parallel. The Gamma
+  // API is read-only and lightly used by us, so the fan-out is fine.
+  const sectionResults = await Promise.all(
+    SECTIONS.map(async (s) => {
+      try {
+        const events = await listEvents({ tagSlug: s.tagSlug, limit: 100 });
+        return { events, section: s.id as Section };
+      } catch (err) {
+        console.error(
+          `[polybot] failed to list events for tag ${s.tagSlug}:`,
+          err,
+        );
+        return { events: [] as PolyEvent[], section: s.id as Section };
+      }
+    }),
+  );
 
-  const buckets: Array<{ events: PolyEvent[]; section: Section }> = [
-    { events: politics, section: "politics" },
-    { events: forex, section: "forex" },
-    { events: sports, section: "sports" },
-  ];
+  const buckets: Array<{ events: PolyEvent[]; section: Section }> =
+    sectionResults;
 
   const candidates: HedgeOpportunity[] = [];
 

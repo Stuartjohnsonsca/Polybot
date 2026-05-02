@@ -58,7 +58,11 @@ export interface GammaEventRaw {
   tags?: GammaTag[];
 }
 
-export type Section = "politics" | "forex" | "sports";
+// Re-exported from the central section config so all importers see the
+// single source of truth.
+export type { Section } from "@/lib/sections";
+import type { Section } from "@/lib/sections";
+import { getSectionByTagSlug } from "@/lib/sections";
 
 export interface PolyMarket {
   id: string;
@@ -96,10 +100,12 @@ export interface PolyEvent {
 }
 
 export function deriveSection(tags: GammaTag[]): Section | null {
+  // Walk every tag on the event, return the first one that matches a
+  // configured section. Iteration order matches Polymarket's tag list,
+  // so the most specific tag tends to win — which is what we want.
   for (const t of tags) {
-    if (t.slug === "politics") return "politics";
-    if (t.slug === "forex") return "forex";
-    if (t.slug === "sports") return "sports";
+    const match = getSectionByTagSlug(t.slug);
+    if (match) return match.id as Section;
   }
   return null;
 }

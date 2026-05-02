@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SECTIONS } from "@/lib/sections";
 import {
   clearBasket,
   getBasketSnapshot,
@@ -286,24 +287,15 @@ function EmptyState() {
         based on the maths.
       </p>
       <div className="mt-4 flex flex-wrap justify-center gap-2">
-        <Link
-          href="/politics"
-          className="rounded-md border border-border bg-panel2 px-4 py-2 text-sm hover:border-accent hover:text-accent"
-        >
-          Browse Politics
-        </Link>
-        <Link
-          href="/forex"
-          className="rounded-md border border-border bg-panel2 px-4 py-2 text-sm hover:border-accent hover:text-accent"
-        >
-          Browse Forex
-        </Link>
-        <Link
-          href="/sports"
-          className="rounded-md border border-border bg-panel2 px-4 py-2 text-sm hover:border-accent hover:text-accent"
-        >
-          Browse Sports
-        </Link>
+        {SECTIONS.map((s) => (
+          <Link
+            key={s.id}
+            href={`/${s.id}`}
+            className="rounded-md border border-border bg-panel2 px-4 py-2 text-sm hover:border-accent hover:text-accent"
+          >
+            Browse {s.label}
+          </Link>
+        ))}
       </div>
     </div>
   );
